@@ -29,17 +29,33 @@ jobs:
       - name: Install backend deps
         run: pip install -r backend/requirements.txt
 
-      - name: Ingest latest FPL data
-        # Tries the real ingest first; falls back to the deterministic offline
-        # seed if the network fetch raises OR produces zero rows, so training
-        # always has data to work with.
+      - name: Seed DB (deterministic offline data)
+        # CI uses the offline seed unconditionally: it's fast, deterministic,
+        # and guarantees training has data. Live ingest is layered on top
+        # in the next step — if it succeeds we get real data too; if it
+        # fails CI still produces a deployable artefact.
         working-directory: backend
         run: |
           python -c "
-          import traceback
+          from app.db.init_db import init_db
           from app.db.session import SessionLocal
           from app.db.models import PlayerGWStats
+          from app.ingest.seed_offline import seed
 
+          init_db()
+          print('[seed] result:', seed())
+          with SessionLocal() as db:
+              rows = db.query(PlayerGWStats).count()
+          print(f'[seed] player_gw_stats rows: {rows}')
+          assert rows > 0, 'offline seed produced no rows'
+          "
+
+      - name: Layer in live FPL data (best-effort)
+        working-directory: backend
+        continue-on-error: true
+        run: |
+          python -c "
+          import traceback
           try:
               from app.ingest.ingest_historical import ingest_all
               from app.ingest.ingest_live import sync_all
@@ -48,20 +64,7 @@ jobs:
               print('live:', asyncio.run(sync_all()))
           except Exception:
               traceback.print_exc()
-              print('[ingest] network ingest raised — will fall back.')
-
-          with SessionLocal() as db:
-              rows = db.query(PlayerGWStats).count()
-          print(f'[ingest] player_gw_stats rows after network ingest: {rows}')
-
-          if rows == 0:
-              print('[fallback] Using offline seed (zero rows after ingest).')
-              from app.ingest.seed_offline import seed
-              print(seed())
-              with SessionLocal() as db:
-                  rows = db.query(PlayerGWStats).count()
-              print(f'[fallback] player_gw_stats rows after seed: {rows}')
-              assert rows > 0, 'offline seed produced no rows'
+              print('[live-ingest] skipped — network ingest failed.')
           "
 
       - name: Train per-position models
