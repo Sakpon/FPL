@@ -1,0 +1,36 @@
+# Cloudflare Worker + D1 configuration for FPL Oracle's edge layer.
+# The Worker exposes /api/* routes backed by D1. Pages serves the React SPA.
+#
+# First-time setup:
+#   wrangler login
+#   wrangler d1 create fpl-oracle
+#   # copy the "database_id" into the [[d1_databases]] section below
+#   wrangler d1 execute fpl-oracle --remote --file=edge/schema.sql
+#
+# Populate data (after running the Python pipeline):
+#   wrangler d1 execute fpl-oracle --remote --file=edge/data.sql
+#
+# Deploy the Worker:
+#   cd edge/worker && npm install && npx wrangler deploy
+#
+# Deploy Pages (frontend):
+#   cd frontend && npm run build
+#   npx wrangler pages deploy dist --project-name=fpl-oracle
+
+name = "fpl-oracle-api"
+main = "worker/src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "fpl-oracle"
+database_id = "REPLACE_ME_WITH_OUTPUT_OF_d1_create"
+
+# Route /api/* on your domain to this Worker (optional — works without custom domain too)
+# [[routes]]
+# pattern = "fpl.example.com/api/*"
+# zone_name = "example.com"
+
+[observability]
+enabled = true

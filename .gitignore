@@ -20,6 +20,11 @@ frontend/dist/
 frontend/.vite/
 frontend/tsconfig.tsbuildinfo
 
+# Cloudflare edge
+edge/worker/node_modules/
+edge/worker/.wrangler/
+edge/data.sql
+
 # IDE
 .idea/
 .vscode/

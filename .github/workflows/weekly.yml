@@ -1,0 +1,108 @@
+name: Weekly retrain + push to Cloudflare
+
+on:
+  # Thursday 09:00 UTC — gives headroom before typical Friday/Saturday deadlines
+  schedule:
+    - cron: "0 9 * * 4"
+  workflow_dispatch:
+    inputs:
+      target_gw:
+        description: "Gameweek to generate recommendations for"
+        required: true
+        default: "35"
+
+env:
+  PYTHONPATH: backend
+
+jobs:
+  retrain-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Ingest latest FPL data
+        # Pulls 3 seasons of historical + current-season live data.
+        # Falls back to offline seed if the network fetch fails, so the
+        # pipeline still produces a deployable artefact.
+        working-directory: backend
+        run: |
+          python -c "
+          import traceback
+          try:
+              from app.ingest.ingest_historical import ingest_all
+              from app.ingest.ingest_live import sync_all
+              import asyncio
+              print('historical:', ingest_all())
+              print('live:', asyncio.run(sync_all()))
+          except Exception:
+              traceback.print_exc()
+              print('[fallback] Using offline seed — network ingest failed.')
+              from app.ingest.seed_offline import seed
+              print(seed())
+          "
+
+      - name: Train per-position models
+        working-directory: backend
+        run: python -m app.ml.train
+
+      - name: Generate recommendations for upcoming GW
+        working-directory: backend
+        env:
+          TARGET_GW: ${{ github.event.inputs.target_gw || '35' }}
+        run: |
+          python -c "
+          import os
+          from app.db.session import SessionLocal
+          from app.services.recommendations import generate_recommendations, accuracy_for_gw
+          gw = int(os.environ['TARGET_GW'])
+          with SessionLocal() as db:
+              print('GEN:', generate_recommendations(db, gw=gw, season='live'))
+              # Record accuracy for the GW before the target, if actuals exist.
+              print('ACC:', accuracy_for_gw(db, gw=gw - 1, season='live'))
+          "
+
+      - name: Export DB to edge/data.sql
+        working-directory: backend
+        run: python -m app.export.to_d1
+
+      - name: Install wrangler
+        run: npm install -g wrangler@3
+
+      - name: Push schema + data to Cloudflare D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler --config edge/wrangler.toml \
+            d1 execute fpl-oracle --remote --file=edge/schema.sql
+          wrangler --config edge/wrangler.toml \
+            d1 execute fpl-oracle --remote --file=edge/data.sql
+
+      - name: Deploy Worker
+        working-directory: edge/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npm install
+          npx wrangler deploy --config ../wrangler.toml
+
+      - name: Build and deploy Pages
+        working-directory: frontend
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VITE_API_BASE: ${{ secrets.VITE_API_BASE }}
+        run: |
+          npm ci
+          npm run build
+          npx wrangler pages deploy dist --project-name=fpl-oracle --branch=main

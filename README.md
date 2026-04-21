@@ -218,3 +218,112 @@ frontend/
 - Auth — admin endpoints are unguarded; add a token before deploying.
 - Production DB — SQLite is fine for local use; swap `DATABASE_URL` for
   Postgres in `core/config.py`.
+
+---
+
+## Deploying to Cloudflare (Pages + Workers + D1)
+
+Because LightGBM / PuLP / scipy don't run on Workers, the Cloudflare deploy
+follows the **compute-offline / serve-from-edge** pattern:
+
+```
+GitHub Actions (weekly) → train LightGBM → export to edge/data.sql
+                                           → wrangler d1 execute
+                                                         │
+                                                         ▼
+                                         Cloudflare D1 ─► Worker (/api/*)
+                                                              │
+                                                     Cloudflare Pages (React)
+```
+
+The intelligence (LightGBM, ILP) still runs — just offline in CI. The edge
+only reads D1 and ships JSON.
+
+### One-time setup
+
+```bash
+# 1. Log in to Cloudflare with wrangler
+npm install -g wrangler@3
+wrangler login
+
+# 2. Create the D1 database
+wrangler d1 create fpl-oracle
+# → copy the printed `database_id` into edge/wrangler.toml
+
+# 3. Create the schema on D1
+wrangler d1 execute fpl-oracle --remote --file=edge/schema.sql
+
+# 4. Create the Pages project (once)
+cd frontend && npm run build
+npx wrangler pages project create fpl-oracle --production-branch=main
+```
+
+### Populate D1 with a first batch
+
+Run the full Python pipeline locally, then export to D1:
+
+```bash
+cd backend && source .venv/bin/activate
+PYTHONPATH=. python -m app.ingest.seed_offline        # or ingest_historical + ingest_live
+PYTHONPATH=. python -m app.ml.train
+PYTHONPATH=. python -c "
+from app.db.session import SessionLocal
+from app.services.recommendations import generate_recommendations
+with SessionLocal() as db:
+    print(generate_recommendations(db, gw=35, season='live'))
+"
+PYTHONPATH=. python -m app.export.to_d1   # writes edge/data.sql
+
+cd ../edge
+wrangler d1 execute fpl-oracle --remote --file=data.sql
+```
+
+### Deploy the Worker (API)
+
+```bash
+cd edge/worker
+npm install
+npx wrangler deploy --config ../wrangler.toml
+# → https://fpl-oracle-api.<your-subdomain>.workers.dev
+```
+
+### Deploy Pages (UI)
+
+```bash
+cd frontend
+VITE_API_BASE=https://fpl-oracle-api.<your-subdomain>.workers.dev/api npm run build
+npx wrangler pages deploy dist --project-name=fpl-oracle --branch=main
+# → https://fpl-oracle.pages.dev
+```
+
+For a cleaner same-origin setup, put both behind a custom domain:
+
+- `yourdomain.com` → Pages (catch-all)
+- `yourdomain.com/api/*` → Worker route (configure in `edge/wrangler.toml`)
+- Leave `VITE_API_BASE` unset — the frontend will use same-origin `/api`.
+
+### Automate with GitHub Actions
+
+`.github/workflows/weekly.yml` retrains + redeploys every Thursday 09:00 UTC
+(or on manual dispatch). Add these repository secrets:
+
+- `CLOUDFLARE_API_TOKEN` — token with *D1:Edit*, *Workers:Edit*, *Pages:Edit*
+- `CLOUDFLARE_ACCOUNT_ID`
+- `VITE_API_BASE` — the Worker URL, e.g. `https://fpl-oracle-api.<subdomain>.workers.dev/api`
+
+### What lives where
+
+| Concern | Where |
+|---|---|
+| LightGBM training, ILP optimisation | GitHub Actions (Python) |
+| Recommendations, actuals, accuracy, guru mentions | Cloudflare D1 |
+| REST API (`/api/*`) | Cloudflare Worker (`edge/worker/`) |
+| React SPA | Cloudflare Pages |
+| Weekly refresh | GH Actions cron, manual dispatch too |
+
+### Tradeoffs
+
+- No live retraining from the browser — model updates only when the GH Action
+  runs (weekly, or manually). Fine for FPL: one deadline a week.
+- `POST /admin/*` endpoints stay in the Python CLI; the edge is read-only.
+- D1 size is well within limits (~250 KB for a full season of data).
