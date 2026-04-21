@@ -18,6 +18,7 @@ backend/app/ml/models/feature_cols.json
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/tsconfig.tsbuildinfo
 
 # IDE
 .idea/
