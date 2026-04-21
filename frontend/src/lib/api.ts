@@ -10,7 +10,11 @@ import type {
   TopPicks,
 } from "@/types/api";
 
-const BASE = "/api";
+// Where to call the backend from. Defaults to same-origin "/api" which works
+// for local dev (Vite proxy) and Pages + same-zone Worker routes.
+// Set VITE_API_BASE at build time to point at a different origin, e.g.
+//   VITE_API_BASE=https://fpl-oracle-api.example.workers.dev/api
+const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
 
 async function jget<T>(path: string): Promise<T> {
   const r = await fetch(`${BASE}${path}`);
