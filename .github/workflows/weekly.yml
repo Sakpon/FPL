@@ -116,6 +116,18 @@ jobs:
         run: |
           npm ci
           npm run build
+          # If VITE_API_BASE points at the Worker, also emit a _redirects
+          # proxy so requests to /api/* on the Pages domain are forwarded to
+          # the Worker. The frontend code uses VITE_API_BASE directly; this
+          # is belt-and-suspenders for same-domain callers.
+          if [ -n "$VITE_API_BASE" ]; then
+            # Prepend /api rule so it matches before the SPA fallback.
+            { echo "/api/*  ${VITE_API_BASE%/}/:splat  200"; cat dist/_redirects; } \
+              > dist/_redirects.new
+            mv dist/_redirects.new dist/_redirects
+            echo "---- dist/_redirects ----"
+            cat dist/_redirects
+          fi
           # Create the Pages project on first run. Swallow "already exists" on
           # subsequent runs so this step stays idempotent.
           npx wrangler@4 pages project create fpl-oracle \
