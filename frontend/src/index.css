@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    @apply bg-ink-50 text-ink-900 antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  :root {
+    --radius: 14px;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-2xl shadow-card border border-ink-200/70;
+  }
+  .card-hover {
+    @apply transition hover:shadow-pop hover:-translate-y-0.5;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium;
+  }
+  .chip-pitch { @apply chip bg-pitch-50 text-pitch-700; }
+  .chip-ink   { @apply chip bg-ink-100 text-ink-700; }
+  .chip-accent{ @apply chip bg-accent-500/10 text-accent-600; }
+  .chip-warn  { @apply chip bg-amber-50 text-amber-700; }
+  .nav-link {
+    @apply px-3 py-2 rounded-lg text-sm font-medium text-ink-500
+           hover:text-ink-900 hover:bg-ink-100 transition;
+  }
+  .nav-link-active {
+    @apply bg-ink-900 text-white hover:bg-ink-900 hover:text-white;
+  }
+  .metric {
+    @apply text-2xl font-semibold tracking-tight text-ink-900;
+  }
+  .metric-label {
+    @apply text-xs uppercase tracking-wide text-ink-500;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium
+           bg-ink-900 text-white hover:bg-ink-800 transition shadow-sm;
+  }
+  .btn-outline {
+    @apply inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium
+           border border-ink-200 text-ink-800 hover:bg-ink-100 transition;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar { height: 8px; width: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-ink-200 rounded-full;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { @apply bg-ink-400; }
+}
