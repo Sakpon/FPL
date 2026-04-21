@@ -56,6 +56,11 @@ def generate_recommendations(
     team_map = _player_team_map(db, preds["player_id"].tolist())
     # The optimizer needs integer tenths for price; align type
     preds["price"] = preds["price"].fillna(40).astype(int)
+    pos_counts = preds["position"].value_counts().to_dict()
+    print(
+        f"[recs] predictions per position: {pos_counts} | "
+        f"total={len(preds)} | price range={preds['price'].min()}-{preds['price'].max()}"
+    )
     opt = optimize(preds[["player_id", "position", "price", "predicted_points"]], team_map)
 
     opt_squad_ids = set(opt.squad["player_id"].astype(int).tolist())
