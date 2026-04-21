@@ -116,4 +116,10 @@ jobs:
         run: |
           npm ci
           npm run build
-          npx wrangler@4 pages deploy dist --project-name=fpl-oracle --branch=main
+          # Create the Pages project on first run. Swallow "already exists" on
+          # subsequent runs so this step stays idempotent.
+          npx wrangler@4 pages project create fpl-oracle \
+            --production-branch=main 2>&1 | tee /tmp/pages-create.log || \
+            grep -qi 'already exists' /tmp/pages-create.log
+          npx wrangler@4 pages deploy dist \
+            --project-name=fpl-oracle --branch=main --commit-dirty=true
