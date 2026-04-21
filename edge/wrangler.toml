@@ -25,7 +25,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "fpl-oracle"
-database_id = "REPLACE_ME_WITH_OUTPUT_OF_d1_create"
+database_id = "167aa02a-cf4b-4ec4-b57c-cd3e0684c9a3"
 
 # Route /api/* on your domain to this Worker (optional — works without custom domain too)
 # [[routes]]
