@@ -75,8 +75,18 @@ jobs:
         working-directory: backend
         run: python -m app.export.to_d1
 
+      - name: Inspect exported data.sql
+        run: |
+          echo "---- size ----"
+          wc -l edge/data.sql
+          du -h edge/data.sql
+          echo "---- first 5 lines ----"
+          head -5 edge/data.sql
+          echo "---- any transaction statements? (should be empty) ----"
+          grep -niE '^\s*(BEGIN|COMMIT|SAVEPOINT|ROLLBACK|RELEASE)\b' edge/data.sql || echo "  none found"
+
       - name: Install wrangler
-        run: npm install -g wrangler@3
+        run: npm install -g wrangler@4
 
       - name: Push schema + data to Cloudflare D1
         env:
@@ -84,9 +94,9 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           wrangler --config edge/wrangler.toml \
-            d1 execute fpl-oracle --remote --file=edge/schema.sql
+            d1 execute fpl-oracle --remote --file=edge/schema.sql --yes
           wrangler --config edge/wrangler.toml \
-            d1 execute fpl-oracle --remote --file=edge/data.sql
+            d1 execute fpl-oracle --remote --file=edge/data.sql --yes
 
       - name: Deploy Worker
         working-directory: edge/worker
@@ -95,7 +105,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           npm install
-          npx wrangler deploy --config ../wrangler.toml
+          npx wrangler@4 deploy --config ../wrangler.toml
 
       - name: Build and deploy Pages
         working-directory: frontend
@@ -106,4 +116,4 @@ jobs:
         run: |
           npm ci
           npm run build
-          npx wrangler pages deploy dist --project-name=fpl-oracle --branch=main
+          npx wrangler@4 pages deploy dist --project-name=fpl-oracle --branch=main
