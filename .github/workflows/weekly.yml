@@ -30,10 +30,11 @@ jobs:
         run: pip install -r backend/requirements.txt
 
       - name: Seed DB (deterministic offline data)
-        # CI uses the offline seed unconditionally: it's fast, deterministic,
-        # and guarantees training has data. Live ingest is layered on top
-        # in the next step — if it succeeds we get real data too; if it
-        # fails CI still produces a deployable artefact.
+        # Use the deterministic seed as the only data source for now. Live
+        # ingest is disabled here because it writes to the same 9999xxxx
+        # id namespace as the seed and overwrites seeded player positions
+        # and team references, corrupting the feature matrix. Re-enable
+        # once live ingest uses a separate namespace or skips existing ids.
         working-directory: backend
         run: |
           python -c "
@@ -48,23 +49,6 @@ jobs:
               rows = db.query(PlayerGWStats).count()
           print(f'[seed] player_gw_stats rows: {rows}')
           assert rows > 0, 'offline seed produced no rows'
-          "
-
-      - name: Layer in live FPL data (best-effort)
-        working-directory: backend
-        continue-on-error: true
-        run: |
-          python -c "
-          import traceback
-          try:
-              from app.ingest.ingest_historical import ingest_all
-              from app.ingest.ingest_live import sync_all
-              import asyncio
-              print('historical:', ingest_all())
-              print('live:', asyncio.run(sync_all()))
-          except Exception:
-              traceback.print_exc()
-              print('[live-ingest] skipped — network ingest failed.')
           "
 
       - name: Train per-position models
