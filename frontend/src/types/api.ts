@@ -14,6 +14,11 @@ export interface Player {
   total_points: number;
   selected_by_percent: number;
   news?: string | null;
+  status?: string | null;
+  chance_of_playing?: number | null;
+  next_opp_short?: string | null;
+  next_was_home?: boolean | null;
+  next_difficulty?: number | null;
 }
 
 export interface Recommendation {
@@ -30,6 +35,12 @@ export interface Recommendation {
   is_captain: boolean;
   in_best_xi: boolean;
   social_score: number;
+  status?: string | null;
+  chance_of_playing?: number | null;
+  news?: string | null;
+  next_opp_short?: string | null;
+  next_was_home?: boolean | null;
+  next_difficulty?: number | null;
 }
 
 export interface Gameweek {
@@ -118,6 +129,12 @@ export interface MyTeamSquadEntry {
   p90: number | null;
   rank_in_position: number | null;
   social_score: number | null;
+  status?: string;
+  chance_of_playing?: number | null;
+  news?: string;
+  next_opp_short?: string | null;
+  next_was_home?: boolean | null;
+  next_difficulty?: number | null;
   fpl_multiplier: number;
   fpl_is_captain: boolean;
   fpl_is_vice_captain: boolean;

@@ -9,6 +9,7 @@ import {
 import { api } from "@/lib/api";
 import { Card, CardHeader, Metric } from "@/components/Card";
 import { ErrorState, Loading } from "@/components/Empty";
+import { AvailabilityChip, FixtureChip } from "@/components/Chips";
 import type { MyTeam, MyTeamSquadEntry } from "@/types/api";
 
 const POS_ORDER: Record<string, number> = { GK: 0, DEF: 1, MID: 2, FWD: 3 };
@@ -205,7 +206,19 @@ function SquadRowTr({ s }: { s: MyTeamSquadEntry }) {
       </td>
       <td className="px-3 py-2">
         <div className="font-medium text-ink-900">{s.web_name}</div>
-        <div className="text-xs text-ink-500">{s.team_short ?? "—"}</div>
+        <div className="mt-0.5 flex items-center gap-1.5 flex-wrap text-xs text-ink-500">
+          <span>{s.team_short ?? "—"}</span>
+          <FixtureChip
+            opp={s.next_opp_short}
+            isHome={s.next_was_home}
+            diff={s.next_difficulty}
+          />
+          <AvailabilityChip
+            status={s.status}
+            chance={s.chance_of_playing}
+            news={s.news}
+          />
+        </div>
       </td>
       <td className="px-3 py-2 text-right">{s.price != null ? `£${s.price.toFixed(1)}` : "—"}</td>
       <td className="px-3 py-2 text-right font-medium">
@@ -231,14 +244,25 @@ function SquadRow({ s, highlight }: { s: MyTeamSquadEntry; highlight?: boolean }
       }`}
     >
       <div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="chip-ink">{s.position}</span>
           <span className="font-semibold text-ink-900">{s.web_name}</span>
           <span className="text-xs text-ink-500">{s.team_short ?? ""}</span>
+          <FixtureChip
+            opp={s.next_opp_short}
+            isHome={s.next_was_home}
+            diff={s.next_difficulty}
+          />
+          <AvailabilityChip
+            status={s.status}
+            chance={s.chance_of_playing}
+            news={s.news}
+          />
         </div>
         <div className="text-xs text-ink-500 mt-1">
           Rank #{s.rank_in_position ?? "—"} in position
           {s.price != null && <> · £{s.price.toFixed(1)}m</>}
+          {s.news ? <span className="block mt-0.5 italic">{s.news}</span> : null}
         </div>
       </div>
       <div className="text-right">

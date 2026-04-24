@@ -18,6 +18,7 @@ from typing import Any
 from app.core.config import ROOT_DIR
 from app.db.models import (
     ActualResult,
+    Fixture,
     Gameweek,
     GuruMention,
     GuruSource,
@@ -98,8 +99,42 @@ def export() -> Path:
             .filter(Player.id >= 99990000, Player.id < 99999999)
             .all()
         )
-        player_rows = [
-            [
+
+        # Next-fixture lookup: resolve each live-season team's opponent and
+        # difficulty for the upcoming (is_next) gameweek so each PlayerCard
+        # can show "vs LIV (A) · Diff 5" without another DB join at request
+        # time.
+        next_gw_row = (
+            db.query(Gameweek)
+            .filter(Gameweek.is_next == True, Gameweek.season == "live")  # noqa: E712
+            .first()
+        )
+        next_gw_id = next_gw_row.id if next_gw_row else None
+        team_next_fix: dict[int, tuple[int, bool, int]] = {}
+        if next_gw_id is not None:
+            for f in (
+                db.query(Fixture)
+                .filter(Fixture.gw == next_gw_id, Fixture.season == "live")
+                .all()
+            ):
+                team_next_fix[f.home_team_id] = (
+                    f.away_team_id, True, f.team_h_difficulty,
+                )
+                team_next_fix[f.away_team_id] = (
+                    f.home_team_id, False, f.team_a_difficulty,
+                )
+
+        def _next_fixture_cols(team_id: int | None) -> tuple[str | None, int | None, int | None]:
+            if team_id is None or team_id not in team_next_fix:
+                return None, None, None
+            opp, home, diff = team_next_fix[team_id]
+            opp_short = teams[opp].short_name if opp in teams else None
+            return opp_short, int(bool(home)), int(diff) if diff is not None else None
+
+        player_rows = []
+        for p in players:
+            opp_short, was_home, diff = _next_fixture_cols(p.team_id)
+            player_rows.append([
                 p.id, p.web_name, p.first_name, p.second_name, p.position,
                 p.team_id,
                 teams[p.team_id].short_name if p.team_id in teams else None,
@@ -107,15 +142,18 @@ def export() -> Path:
                 round(p.now_cost / 10.0, 1),
                 p.form, p.total_points,
                 p.selected_by_percent, p.news or "",
-            ]
-            for p in players
-        ]
+                (p.status or "a")[:2],
+                p.chance_of_playing,
+                opp_short, was_home, diff,
+            ])
         _insert_many(
             lines, "players",
             [
                 "id", "web_name", "first_name", "second_name", "position",
                 "team_id", "team_short", "team_name", "price", "form",
                 "total_points", "selected_by_percent", "news",
+                "status", "chance_of_playing",
+                "next_opp_short", "next_was_home", "next_difficulty",
             ],
             player_rows,
         )

@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { Crown, Sparkles, TrendingUp, MessageSquareText } from "lucide-react";
 import type { Recommendation } from "@/types/api";
 import { cn, posColor, positionFullName } from "@/lib/utils";
+import { AvailabilityChip, FixtureChip } from "@/components/Chips";
 
 interface Props {
   rec: Recommendation;
@@ -47,9 +48,19 @@ export default function PlayerCard({ rec, featured, showBand = true }: Props) {
             <div className="truncate font-semibold text-ink-900">{rec.web_name}</div>
             <div className="text-sm text-ink-500">£{rec.price.toFixed(1)}</div>
           </div>
-          <div className="flex items-center gap-2 text-[11px] text-ink-500">
+          <div className="flex items-center gap-2 flex-wrap text-[11px] text-ink-500">
             <span className="chip-ink">{rec.team_short ?? "—"}</span>
             <span>Rank #{rec.rank_in_position}</span>
+            <FixtureChip
+              opp={rec.next_opp_short}
+              isHome={rec.next_was_home}
+              diff={rec.next_difficulty}
+            />
+            <AvailabilityChip
+              status={rec.status}
+              chance={rec.chance_of_playing}
+              news={rec.news}
+            />
           </div>
         </div>
       </div>

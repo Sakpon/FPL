@@ -5,6 +5,7 @@ import { Search } from "lucide-react";
 import { api } from "@/lib/api";
 import { Card, CardHeader } from "@/components/Card";
 import { Loading, ErrorState } from "@/components/Empty";
+import { AvailabilityChip, FixtureChip } from "@/components/Chips";
 import { cn, posColor } from "@/lib/utils";
 import type { Position } from "@/types/api";
 
@@ -94,7 +95,21 @@ export default function Players() {
                     <td className="px-3 py-2">
                       <span className={cn("chip border", posColor(p.position))}>{p.position}</span>
                     </td>
-                    <td className="px-3 py-2 text-ink-700">{p.team_short ?? "—"}</td>
+                    <td className="px-3 py-2 text-ink-700">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span>{p.team_short ?? "—"}</span>
+                        <FixtureChip
+                          opp={p.next_opp_short}
+                          isHome={p.next_was_home}
+                          diff={p.next_difficulty}
+                        />
+                        <AvailabilityChip
+                          status={p.status}
+                          chance={p.chance_of_playing}
+                          news={p.news}
+                        />
+                      </div>
+                    </td>
                     <td className="px-3 py-2 text-right">£{p.price.toFixed(1)}</td>
                     <td className="px-3 py-2 text-right">{p.form.toFixed(1)}</td>
                     <td className="px-3 py-2 text-right font-medium">{p.total_points}</td>
