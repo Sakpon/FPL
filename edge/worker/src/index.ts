@@ -20,6 +20,7 @@
  *   GET /api/accuracy/history
  *   GET /api/gurus/mentions/:gw?limit=
  *   GET /api/gurus/summary/:gw
+ *   GET /api/team/:fplTeamId        (fetches from FPL public API, joins with D1)
  */
 
 import { Hono } from "hono";
@@ -312,6 +313,224 @@ app.get("/api/gurus/summary/:gw", async (c) => {
       sentiment_sum: Number((r.sentiment_sum ?? 0).toFixed(2)),
     }))
   );
+});
+
+// ---------- My Team: fetch user squad from FPL API + analyse ----------
+
+const LIVE_PID_OFFSET = 9999 * 10000; // mirrors backend/app/ingest/ingest_live._pid
+const FPL_API = "https://fantasy.premierleague.com/api";
+const FPL_UA = { "User-Agent": "fpl-oracle-edge/1.0 (+https://fpl-oracle.pages.dev)" };
+const XI_MIN: Record<string, number> = { GK: 1, DEF: 3, MID: 2, FWD: 1 };
+const XI_MAX: Record<string, number> = { GK: 1, DEF: 5, MID: 5, FWD: 3 };
+
+type SquadEntry = {
+  player_id: number;
+  element: number;
+  web_name: string;
+  position: string;
+  team_short: string | null;
+  price: number | null;
+  predicted_points: number | null;
+  p10: number | null;
+  p90: number | null;
+  rank_in_position: number | null;
+  social_score: number | null;
+  fpl_multiplier: number;
+  fpl_is_captain: boolean;
+  fpl_is_vice_captain: boolean;
+};
+
+app.get("/api/team/:fplTeamId", async (c) => {
+  const teamId = Number(c.req.param("fplTeamId"));
+  if (!Number.isInteger(teamId) || teamId <= 0) {
+    return c.json({ error: "Invalid team id" }, 400);
+  }
+
+  // Target GW = the upcoming GW we generate recommendations for.
+  const nextRow = await c.env.DB
+    .prepare("SELECT id FROM gameweeks WHERE is_next = 1 LIMIT 1")
+    .first<any>();
+  const currentRow = await c.env.DB
+    .prepare("SELECT id FROM gameweeks WHERE is_current = 1 LIMIT 1")
+    .first<any>();
+  const targetGw: number | undefined = nextRow?.id ?? currentRow?.id;
+  if (!targetGw) return c.json({ error: "No upcoming gameweek loaded" }, 500);
+
+  // Pull the entry (team name, rank, bank) + picks for target GW in parallel.
+  let entryResp: Response;
+  let picksResp: Response;
+  try {
+    [entryResp, picksResp] = await Promise.all([
+      fetch(`${FPL_API}/entry/${teamId}/`, { headers: FPL_UA }),
+      fetch(`${FPL_API}/entry/${teamId}/event/${targetGw}/picks/`, { headers: FPL_UA }),
+    ]);
+  } catch (e: any) {
+    return c.json({ error: "Could not reach FPL API", detail: String(e) }, 502);
+  }
+
+  if (entryResp.status === 404) return c.json({ error: "Team not found" }, 404);
+  if (!entryResp.ok) {
+    return c.json({ error: "FPL API error", status: entryResp.status }, 502);
+  }
+  const entry: any = await entryResp.json();
+
+  // Picks may not exist yet for the upcoming GW — fall back to the current
+  // (finished) GW so we still have a squad to analyse.
+  let picks: any = null;
+  let picksGw = targetGw;
+  if (picksResp.ok) {
+    picks = await picksResp.json();
+  } else if (currentRow && currentRow.id !== targetGw) {
+    const r = await fetch(
+      `${FPL_API}/entry/${teamId}/event/${currentRow.id}/picks/`,
+      { headers: FPL_UA }
+    );
+    if (r.ok) {
+      picks = await r.json();
+      picksGw = currentRow.id;
+    }
+  }
+  if (!picks || !Array.isArray(picks.picks)) {
+    return c.json(
+      { error: "No saved picks for this team yet" },
+      404
+    );
+  }
+
+  const fplPicks: Array<{
+    element: number; multiplier: number; is_captain: boolean; is_vice_captain: boolean;
+  }> = picks.picks;
+  const playerIds = fplPicks.map((p) => LIVE_PID_OFFSET + p.element);
+  const placeholders = playerIds.map(() => "?").join(",");
+
+  // Join with recommendations for the TARGET GW (their picks may be from a
+  // previous GW but we want to analyse the upcoming one).
+  const { results: recRes } = await c.env.DB
+    .prepare(
+      `${RECS_SELECT} WHERE r.gw = ? AND r.player_id IN (${placeholders})`
+    )
+    .bind(targetGw, ...playerIds)
+    .all();
+  const recById = new Map<number, ReturnType<typeof shapeRec>>();
+  for (const r of (recRes as any[]) ?? []) recById.set(r.player_id, shapeRec(r as RecRow));
+
+  // Fallback metadata for players not in recommendations (e.g. filtered out).
+  const { results: pRes } = await c.env.DB
+    .prepare(`SELECT * FROM players WHERE id IN (${placeholders})`)
+    .bind(...playerIds)
+    .all();
+  const playerById = new Map<number, ReturnType<typeof shapePlayer>>();
+  for (const p of (pRes as any[]) ?? []) playerById.set(p.id, shapePlayer(p as PlayerRow));
+
+  const squad: SquadEntry[] = fplPicks.map((fp) => {
+    const pid = LIVE_PID_OFFSET + fp.element;
+    const rec = recById.get(pid);
+    const player = playerById.get(pid);
+    return {
+      player_id: pid,
+      element: fp.element,
+      web_name: rec?.web_name ?? player?.web_name ?? `#${fp.element}`,
+      position: rec?.position ?? player?.position ?? "—",
+      team_short: rec?.team_short ?? player?.team_short ?? null,
+      price: rec?.price ?? player?.price ?? null,
+      predicted_points: rec?.predicted_points ?? null,
+      p10: rec?.p10 ?? null,
+      p90: rec?.p90 ?? null,
+      rank_in_position: rec?.rank_in_position ?? null,
+      social_score: rec?.social_score ?? null,
+      fpl_multiplier: fp.multiplier,
+      fpl_is_captain: fp.is_captain,
+      fpl_is_vice_captain: fp.is_vice_captain,
+    };
+  });
+
+  // ---- Formation-legal starting XI from the 15 ----
+  const key = (s: SquadEntry) => (s.predicted_points ?? -Infinity);
+  const sortedDesc = [...squad].sort((a, b) => key(b) - key(a));
+
+  const starting: SquadEntry[] = [];
+  const count: Record<string, number> = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
+
+  // Fill minimums per position first, then the best remaining respecting maxes.
+  for (const pos of ["GK", "DEF", "MID", "FWD"] as const) {
+    for (const s of sortedDesc) {
+      if (starting.length >= 11) break;
+      if (count[pos] >= XI_MIN[pos]) break;
+      if (s.position !== pos) continue;
+      if (starting.includes(s)) continue;
+      starting.push(s);
+      count[pos]++;
+    }
+  }
+  for (const s of sortedDesc) {
+    if (starting.length >= 11) break;
+    if (starting.includes(s)) continue;
+    const pos = s.position;
+    if (count[pos] == null) continue; // unknown position — skip
+    if (count[pos] >= XI_MAX[pos]) continue;
+    starting.push(s);
+    count[pos]++;
+  }
+  const startingSet = new Set(starting.map((s) => s.player_id));
+  const bench = squad.filter((s) => !startingSet.has(s.player_id));
+
+  // Captain = highest predicted in starting XI
+  const captainSuggestion =
+    starting.length > 0
+      ? [...starting].sort((a, b) => key(b) - key(a))[0]
+      : null;
+
+  const startingXp = starting.reduce((s, p) => s + (p.predicted_points ?? 0), 0);
+  const captainXp = captainSuggestion?.predicted_points ?? 0;
+  const expectedPoints = Number((startingXp + captainXp).toFixed(2));
+
+  // ---- Swap candidates for the 3 weakest in starting XI ----
+  const weakest = [...starting]
+    .filter((s) => s.predicted_points != null)
+    .sort((a, b) => key(a) - key(b))
+    .slice(0, 3);
+  const squadIdList = squad.map((s) => s.player_id);
+  const squadIdPlaceholders = squadIdList.map(() => "?").join(",");
+
+  const swap_suggestions: Array<{ out: SquadEntry; candidates: ReturnType<typeof shapeRec>[] }> = [];
+  for (const w of weakest) {
+    const { results } = await c.env.DB
+      .prepare(
+        `${RECS_SELECT} WHERE r.gw = ? AND r.position = ?` +
+        ` AND r.player_id NOT IN (${squadIdPlaceholders})` +
+        ` ORDER BY r.predicted_points DESC LIMIT 5`
+      )
+      .bind(targetGw, w.position, ...squadIdList)
+      .all();
+    swap_suggestions.push({
+      out: w,
+      candidates: ((results as any[]) ?? []).map((r) => shapeRec(r as RecRow)),
+    });
+  }
+
+  return c.json({
+    team_id: teamId,
+    team_name: entry.name ?? null,
+    player_name:
+      `${entry.player_first_name ?? ""} ${entry.player_last_name ?? ""}`.trim() || null,
+    total_points: entry.summary_overall_points ?? null,
+    overall_rank: entry.summary_overall_rank ?? null,
+    bank: entry.last_deadline_bank != null ? entry.last_deadline_bank / 10 : null,
+    team_value:
+      entry.last_deadline_value != null ? entry.last_deadline_value / 10 : null,
+    picks_gw: picksGw,
+    target_gw: targetGw,
+    squad,
+    starting_xi: starting,
+    bench,
+    captain_suggestion: captainSuggestion,
+    expected_points: expectedPoints,
+    swap_suggestions,
+    notes:
+      picksGw !== targetGw
+        ? `Showing your GW${picksGw} squad — you have not saved a team for GW${targetGw} yet.`
+        : null,
+  });
 });
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));

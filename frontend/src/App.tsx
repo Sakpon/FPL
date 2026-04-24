@@ -5,6 +5,7 @@ import {
   Trophy,
   Megaphone,
   LineChart,
+  UserCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import Dashboard from "@/pages/Dashboard";
@@ -12,11 +13,13 @@ import BestXI from "@/pages/BestXI";
 import History from "@/pages/History";
 import PlayerDetail from "@/pages/PlayerDetail";
 import Gurus from "@/pages/Gurus";
+import MyTeam from "@/pages/MyTeam";
 import Players from "@/pages/Players";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/best-xi", label: "Best XI", icon: Trophy },
+  { to: "/my-team", label: "My Team", icon: UserCircle },
   { to: "/players", label: "Players", icon: Users },
   { to: "/gurus", label: "Gurus", icon: Megaphone },
   { to: "/history", label: "Accuracy", icon: LineChart },
@@ -30,6 +33,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/best-xi" element={<BestXI />} />
+          <Route path="/my-team" element={<MyTeam />} />
           <Route path="/players" element={<Players />} />
           <Route path="/player/:id" element={<PlayerDetail />} />
           <Route path="/gurus" element={<Gurus />} />
