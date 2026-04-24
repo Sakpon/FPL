@@ -64,11 +64,19 @@ jobs:
           import os
           from app.db.session import SessionLocal
           from app.services.recommendations import generate_recommendations, accuracy_for_gw
-          gw = int(os.environ['TARGET_GW'])
+          target = int(os.environ['TARGET_GW'])
           with SessionLocal() as db:
-              print('GEN:', generate_recommendations(db, gw=gw, season='live'))
-              # Record accuracy for the GW before the target, if actuals exist.
-              print('ACC:', accuracy_for_gw(db, gw=gw - 1, season='live'))
+              # Backfill: generate recs for every finished GW so we have
+              # something to compare to actuals (populates accuracy_log and
+              # History chart). Seed marks GWs 1..target-1 as finished.
+              for gw in range(1, target):
+                  r = generate_recommendations(db, gw=gw, season='live')
+                  a = accuracy_for_gw(db, gw=gw, season='live')
+                  print(f'[backfill] gw={gw} gen={r.get(\"status\")} '
+                        f'acc.mae={a.get(\"mae\")} n={a.get(\"n\")}')
+              # The live/upcoming GW we actually deploy picks for.
+              print('GEN:', generate_recommendations(db, gw=target, season='live'))
+              print('ACC:', accuracy_for_gw(db, gw=target - 1, season='live'))
           "
 
       - name: Export DB to edge/data.sql
