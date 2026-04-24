@@ -30,11 +30,10 @@ jobs:
         run: pip install -r backend/requirements.txt
 
       - name: Seed DB (deterministic offline data)
-        # Use the deterministic seed as the only data source for now. Live
-        # ingest is disabled here because it writes to the same 9999xxxx
-        # id namespace as the seed and overwrites seeded player positions
-        # and team references, corrupting the feature matrix. Re-enable
-        # once live ingest uses a separate namespace or skips existing ids.
+        # Historical seasons (2023-24, 2024-25) stay synthetic — they're just
+        # training-feature padding. The live season is refreshed from the
+        # real FPL API in the next step so the portal serves the current
+        # roster rather than a stale hardcoded pool.
         working-directory: backend
         run: |
           python -c "
@@ -51,6 +50,155 @@ jobs:
           assert rows > 0, 'offline seed produced no rows'
           "
 
+      - name: Refresh live season from FPL API
+        # Drop seed-created live-season rows (9999xxxx namespace) and repopulate
+        # from the real FPL API so the portal shows the current roster. Any
+        # failure falls back silently to the seeded synthetic live data — the
+        # pipeline still produces a deployable build.
+        working-directory: backend
+        run: |
+          python -c "
+          import asyncio
+          import traceback
+          from sqlalchemy import and_
+
+          from app.db.session import SessionLocal
+          from app.db.models import (
+              ActualResult, Fixture, Gameweek, GuruMention, GuruSource,
+              Player, PlayerGWStats, Team,
+          )
+          from app.ingest import ingest_live as live
+          from app.ingest.seed_offline import seed as reseed
+          from app.ingest import fpl_api
+
+          LIVE_PID_LO, LIVE_PID_HI = 9999_0000, 9999_9999
+          LIVE_TID_LO, LIVE_TID_HI = 999901, 999999
+          LIVE_FID_LO, LIVE_FID_HI = 9999_00000, 9999_99999
+
+          # Fail-safe probe: if the FPL API is unreachable, leave the seed
+          # alone — a stale-but-working dashboard beats an empty one.
+          try:
+              probe = asyncio.run(fpl_api.fetch_bootstrap())
+              assert probe.get('teams') and probe.get('elements'), 'empty bootstrap'
+          except Exception:
+              print('[live] FPL API unreachable — keeping seeded live data')
+              traceback.print_exc()
+              import sys
+              sys.exit(0)
+
+          try:
+              # 1. Wipe seeded live rows so the FPL API becomes the source of
+              # truth for this season (identity, positions, prices, stats).
+              with SessionLocal() as db:
+                  db.query(GuruMention).filter(
+                      GuruMention.player_id.between(LIVE_PID_LO, LIVE_PID_HI)
+                  ).delete(synchronize_session=False)
+                  db.query(ActualResult).filter(
+                      ActualResult.player_id.between(LIVE_PID_LO, LIVE_PID_HI)
+                  ).delete(synchronize_session=False)
+                  db.query(PlayerGWStats).filter(
+                      and_(
+                          PlayerGWStats.season == 'live',
+                          PlayerGWStats.player_id.between(LIVE_PID_LO, LIVE_PID_HI),
+                      )
+                  ).delete(synchronize_session=False)
+                  db.query(Fixture).filter(
+                      Fixture.id.between(LIVE_FID_LO, LIVE_FID_HI)
+                  ).delete(synchronize_session=False)
+                  db.query(Player).filter(
+                      Player.id.between(LIVE_PID_LO, LIVE_PID_HI)
+                  ).delete(synchronize_session=False)
+                  db.query(Gameweek).filter(Gameweek.season == 'live').delete(
+                      synchronize_session=False
+                  )
+                  db.query(Team).filter(
+                      Team.id.between(LIVE_TID_LO, LIVE_TID_HI)
+                  ).delete(synchronize_session=False)
+                  db.commit()
+
+              # 2. Bootstrap — real teams, players, gameweeks
+              print('[live] bootstrap:', asyncio.run(live.sync_bootstrap()))
+              print('[live] fixtures:', asyncio.run(live.sync_fixtures()))
+
+              # 3. Pull finished-GW stats so training has real features
+              with SessionLocal() as db:
+                  finished = [
+                      g.id for g in db.query(Gameweek)
+                      .filter(Gameweek.finished == True, Gameweek.season == 'live')
+                      .order_by(Gameweek.id).all()
+                  ]
+              print(f'[live] finished GWs: {finished}')
+              for gw in finished:
+                  n = asyncio.run(live.sync_live_points(gw))
+                  print(f'[live] GW{gw} → {n} rows')
+
+              # 4. Re-seed guru mentions against real top players so the
+              # dashboard Buzz panel is not empty. Deterministic shuffle.
+              import random
+              rng = random.Random(42)
+              with SessionLocal() as db:
+                  if db.query(GuruSource).count() == 0:
+                      print('[live] no guru sources (seed did not run?)')
+                  else:
+                      sources = db.query(GuruSource).all()
+                      top_players = (
+                          db.query(Player)
+                          .filter(Player.id.between(LIVE_PID_LO, LIVE_PID_HI))
+                          .order_by(Player.total_points.desc())
+                          .limit(80)
+                          .all()
+                      )
+                      next_gw = db.query(Gameweek).filter_by(
+                          is_next=True, season='live'
+                      ).first()
+                      target_gw = next_gw.id if next_gw else 35
+                      for src in sources:
+                          rng.shuffle(top_players)
+                          picks = top_players[: rng.randint(4, 7)]
+                          for i, p in enumerate(picks):
+                              db.add(GuruMention(
+                                  source_id=src.id, player_id=p.id, gw=target_gw,
+                                  sentiment=round(rng.uniform(0.2, 1.0), 2),
+                                  is_captain_pick=(i == 0 and rng.random() < 0.5),
+                                  is_differential=(
+                                      p.selected_by_percent < 8
+                                      and rng.random() < 0.4
+                                  ),
+                                  is_avoid=False,
+                                  snippet=(
+                                      f'{src.name} highlighted {p.web_name} '
+                                      f'for GW{target_gw}'
+                                  ),
+                              ))
+                      db.commit()
+                      print(f'[live] re-seeded guru mentions for GW{target_gw}')
+
+              with SessionLocal() as db:
+                  p = db.query(Player).filter(
+                      Player.id.between(LIVE_PID_LO, LIVE_PID_HI)
+                  ).count()
+                  s = db.query(PlayerGWStats).filter(
+                      PlayerGWStats.season == 'live'
+                  ).count()
+                  a = db.query(ActualResult).filter(
+                      ActualResult.season == 'live'
+                  ).count()
+                  print(f'[live] final counts — players={p} stats={s} actuals={a}')
+          except Exception:
+              print('[live] refresh failed after wipe — re-seeding live data')
+              traceback.print_exc()
+              # Wipe again and re-seed everything so we don't train on a
+              # half-populated live season.
+              with SessionLocal() as db:
+                  for model in (
+                      GuruMention, ActualResult, PlayerGWStats, Fixture,
+                      Player, Gameweek, Team, GuruSource,
+                  ):
+                      db.query(model).delete(synchronize_session=False)
+                  db.commit()
+              print('[live] reseed:', reseed())
+          "
+
       - name: Train per-position models
         working-directory: backend
         run: python -m app.ml.train
@@ -64,11 +212,19 @@ jobs:
           import os
           from app.db.session import SessionLocal
           from app.services.recommendations import generate_recommendations, accuracy_for_gw
-          gw = int(os.environ['TARGET_GW'])
+          target = int(os.environ['TARGET_GW'])
           with SessionLocal() as db:
-              print('GEN:', generate_recommendations(db, gw=gw, season='live'))
-              # Record accuracy for the GW before the target, if actuals exist.
-              print('ACC:', accuracy_for_gw(db, gw=gw - 1, season='live'))
+              # Backfill: generate recs for every finished GW so we have
+              # something to compare to actuals (populates accuracy_log and
+              # History chart). Seed marks GWs 1..target-1 as finished.
+              for gw in range(1, target):
+                  r = generate_recommendations(db, gw=gw, season='live')
+                  a = accuracy_for_gw(db, gw=gw, season='live')
+                  print(f'[backfill] gw={gw} gen={r.get(\"status\")} '
+                        f'acc.mae={a.get(\"mae\")} n={a.get(\"n\")}')
+              # The live/upcoming GW we actually deploy picks for.
+              print('GEN:', generate_recommendations(db, gw=target, season='live'))
+              print('ACC:', accuracy_for_gw(db, gw=target - 1, season='live'))
           "
 
       - name: Export DB to edge/data.sql
