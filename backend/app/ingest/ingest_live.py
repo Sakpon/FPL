@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import ActualResult, Fixture, Gameweek, Player, Team
+from app.db.models import ActualResult, Fixture, Gameweek, Player, PlayerGWStats, Team
 from app.db.session import SessionLocal
 from app.ingest import fpl_api
 
@@ -112,33 +112,89 @@ async def sync_fixtures() -> int:
 
 
 async def sync_live_points(event_id: int) -> int:
+    """Write ActualResult + PlayerGWStats for a finished gameweek from the
+    /event/{id}/live/ endpoint. Training needs PlayerGWStats for its feature
+    matrix; ActualResult is what accuracy_for_gw compares predictions against.
+    """
     data = await fpl_api.fetch_event_live(event_id)
     elements = data.get("elements", [])
     written = 0
     with SessionLocal() as db:
+        # Map fixtures in this GW → opponent + home/away for each player's team
+        fixtures = db.query(Fixture).filter_by(gw=event_id, season=CURRENT_SEASON).all()
+        team_ctx: dict[int, tuple[int, bool]] = {}  # team_id → (opponent_team_id, was_home)
+        for f in fixtures:
+            team_ctx[f.home_team_id] = (f.away_team_id, True)
+            team_ctx[f.away_team_id] = (f.home_team_id, False)
+
         for e in elements:
             pid = _pid(e["id"])
-            if db.get(Player, pid) is None:
+            player = db.get(Player, pid)
+            if player is None:
                 continue
             stats = e.get("stats", {})
-            existing = db.execute(
+            opp, home = team_ctx.get(player.team_id, (None, False))
+
+            actual = db.execute(
                 select(ActualResult).where(
                     ActualResult.player_id == pid,
                     ActualResult.season == CURRENT_SEASON,
                     ActualResult.gw == event_id,
                 )
             ).scalar_one_or_none()
-            if existing is None:
-                existing = ActualResult(
+            if actual is None:
+                actual = ActualResult(
                     player_id=pid, season=CURRENT_SEASON, gw=event_id
                 )
-                db.add(existing)
-            existing.actual_points = stats.get("total_points", 0) or 0
-            existing.goals_scored = stats.get("goals_scored", 0) or 0
-            existing.assists = stats.get("assists", 0) or 0
-            existing.clean_sheet = bool(stats.get("clean_sheets", 0))
-            existing.minutes = stats.get("minutes", 0) or 0
-            existing.bonus = stats.get("bonus", 0) or 0
+                db.add(actual)
+            actual.actual_points = stats.get("total_points", 0) or 0
+            actual.goals_scored = stats.get("goals_scored", 0) or 0
+            actual.assists = stats.get("assists", 0) or 0
+            actual.clean_sheet = bool(stats.get("clean_sheets", 0))
+            actual.minutes = stats.get("minutes", 0) or 0
+            actual.bonus = stats.get("bonus", 0) or 0
+
+            gws = db.execute(
+                select(PlayerGWStats).where(
+                    PlayerGWStats.player_id == pid,
+                    PlayerGWStats.season == CURRENT_SEASON,
+                    PlayerGWStats.gw == event_id,
+                )
+            ).scalar_one_or_none()
+            if gws is None:
+                gws = PlayerGWStats(
+                    player_id=pid, season=CURRENT_SEASON, gw=event_id
+                )
+                db.add(gws)
+            gws.opponent_team_id = opp
+            gws.was_home = home
+            gws.minutes = stats.get("minutes", 0) or 0
+            gws.goals_scored = stats.get("goals_scored", 0) or 0
+            gws.assists = stats.get("assists", 0) or 0
+            gws.clean_sheets = stats.get("clean_sheets", 0) or 0
+            gws.goals_conceded = stats.get("goals_conceded", 0) or 0
+            gws.own_goals = stats.get("own_goals", 0) or 0
+            gws.penalties_saved = stats.get("penalties_saved", 0) or 0
+            gws.penalties_missed = stats.get("penalties_missed", 0) or 0
+            gws.yellow_cards = stats.get("yellow_cards", 0) or 0
+            gws.red_cards = stats.get("red_cards", 0) or 0
+            gws.saves = stats.get("saves", 0) or 0
+            gws.bonus = stats.get("bonus", 0) or 0
+            gws.bps = stats.get("bps", 0) or 0
+            gws.influence = float(stats.get("influence") or 0)
+            gws.creativity = float(stats.get("creativity") or 0)
+            gws.threat = float(stats.get("threat") or 0)
+            gws.ict_index = float(stats.get("ict_index") or 0)
+            gws.expected_goals = float(stats.get("expected_goals") or 0)
+            gws.expected_assists = float(stats.get("expected_assists") or 0)
+            gws.expected_goal_involvements = float(
+                stats.get("expected_goal_involvements") or 0
+            )
+            gws.expected_goals_conceded = float(
+                stats.get("expected_goals_conceded") or 0
+            )
+            gws.value = player.now_cost or 40
+            gws.total_points = stats.get("total_points", 0) or 0
             written += 1
         db.commit()
     return written
