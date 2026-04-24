@@ -105,3 +105,44 @@ export interface PlayerHistoryRow {
   xg: number;
   xa: number;
 }
+
+export interface MyTeamSquadEntry {
+  player_id: number;
+  element: number;
+  web_name: string;
+  position: Position | "—";
+  team_short: string | null;
+  price: number | null;
+  predicted_points: number | null;
+  p10: number | null;
+  p90: number | null;
+  rank_in_position: number | null;
+  social_score: number | null;
+  fpl_multiplier: number;
+  fpl_is_captain: boolean;
+  fpl_is_vice_captain: boolean;
+}
+
+export interface MyTeamSwap {
+  out: MyTeamSquadEntry;
+  candidates: Recommendation[];
+}
+
+export interface MyTeam {
+  team_id: number;
+  team_name: string | null;
+  player_name: string | null;
+  total_points: number | null;
+  overall_rank: number | null;
+  bank: number | null;
+  team_value: number | null;
+  picks_gw: number;
+  target_gw: number;
+  squad: MyTeamSquadEntry[];
+  starting_xi: MyTeamSquadEntry[];
+  bench: MyTeamSquadEntry[];
+  captain_suggestion: MyTeamSquadEntry | null;
+  expected_points: number;
+  swap_suggestions: MyTeamSwap[];
+  notes: string | null;
+}
