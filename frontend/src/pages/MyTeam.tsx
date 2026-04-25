@@ -1,16 +1,22 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowLeftRight,
   Crown,
   Info,
+  Radio,
   User,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Card, CardHeader, Metric } from "@/components/Card";
 import { ErrorState, Loading } from "@/components/Empty";
 import { AvailabilityChip, FixtureChip } from "@/components/Chips";
-import type { MyTeam, MyTeamSquadEntry } from "@/types/api";
+import type {
+  MyTeam,
+  MyTeamLive,
+  MyTeamLiveSquadEntry,
+  MyTeamSquadEntry,
+} from "@/types/api";
 
 const POS_ORDER: Record<string, number> = { GK: 0, DEF: 1, MID: 2, FWD: 3 };
 
@@ -69,8 +75,131 @@ export default function MyTeamPage() {
       {mut.isError && (
         <ErrorState message={(mut.error as Error).message || "Could not analyse team"} />
       )}
-      {mut.data && <TeamView team={mut.data} />}
+      {mut.data && (
+        <>
+          <LiveSection teamId={mut.data.team_id} />
+          <TeamView team={mut.data} />
+        </>
+      )}
     </div>
+  );
+}
+
+function LiveSection({ teamId }: { teamId: number }) {
+  // Poll the live endpoint every 60s. The Worker edge-caches the upstream
+  // FPL `/event/{id}/live/` for 30s so this is cheap. The query is enabled
+  // unconditionally; if there's no current GW the API returns 404 and we
+  // hide the section.
+  const liveQ = useQuery({
+    queryKey: ["myTeamLive", teamId],
+    queryFn: () => api.myTeamLive(teamId),
+    refetchInterval: (q) => (q.state.error || q.state.data?.finished ? false : 60_000),
+    refetchOnWindowFocus: true,
+    retry: false,
+  });
+
+  if (liveQ.isLoading) return null;
+  if (liveQ.isError || !liveQ.data) return null;
+  const data = liveQ.data;
+  if (data.finished) return null;
+
+  return <LiveCard data={data} />;
+}
+
+function LiveCard({ data }: { data: MyTeamLive }) {
+  const sortedSquad = [...data.squad].sort((a, b) => {
+    if (a.is_starter !== b.is_starter) return a.is_starter ? -1 : 1;
+    if (a.is_starter) return a.pick_position - b.pick_position;
+    return a.pick_position - b.pick_position;
+  });
+
+  return (
+    <Card>
+      <CardHeader
+        title={
+          <div className="flex items-center gap-2">
+            <span className="relative inline-flex">
+              <Radio className="h-4 w-4 text-rose-600" />
+              <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse" />
+            </span>
+            Live · GW{data.gw}
+          </div>
+        }
+        subtitle={`${data.starters_played}/${data.starters_total} starters in play · refreshes every 60s`}
+        right={
+          <div className="text-right">
+            <div className="text-3xl font-semibold tabular-nums">
+              {data.live_points}
+            </div>
+            <div className="metric-label">live pts</div>
+          </div>
+        }
+      />
+      <div className="overflow-x-auto -mx-2">
+        <table className="w-full text-sm">
+          <thead className="text-ink-500 text-xs uppercase">
+            <tr>
+              <th className="px-3 py-2 text-left">Pos</th>
+              <th className="px-3 py-2 text-left">Player</th>
+              <th className="px-3 py-2 text-right">Min</th>
+              <th className="px-3 py-2 text-right">G/A</th>
+              <th className="px-3 py-2 text-right">Bonus</th>
+              <th className="px-3 py-2 text-right">Pts</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedSquad.map((p) => (
+              <LiveRow key={p.player_id} p={p} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function LiveRow({ p }: { p: MyTeamLiveSquadEntry }) {
+  const ko = p.minutes === 0 && p.is_starter;
+  return (
+    <tr
+      className={`border-t border-ink-100 ${
+        p.is_starter ? "" : "bg-ink-50/40 text-ink-500"
+      }`}
+    >
+      <td className="px-3 py-2">
+        <span className="chip-ink">{p.position}</span>
+      </td>
+      <td className="px-3 py-2">
+        <div className="flex items-center gap-2">
+          <span className="font-medium text-ink-900">{p.web_name}</span>
+          {p.is_captain && (
+            <span className="chip-accent">
+              <Crown className="h-3 w-3" /> C
+            </span>
+          )}
+          {p.is_vice_captain && !p.is_captain && (
+            <span className="chip-ink">VC</span>
+          )}
+          {!p.is_starter && <span className="text-xs">bench</span>}
+        </div>
+        <div className="text-xs text-ink-500">{p.team_short ?? "—"}</div>
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {ko ? "—" : p.minutes}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {p.goals_scored}/{p.assists}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">{p.bonus}</td>
+      <td className="px-3 py-2 text-right font-semibold tabular-nums">
+        {p.is_starter ? p.points : p.raw_points}
+        {p.is_captain && p.multiplier > 1 && (
+          <span className="ml-1 text-[10px] text-accent-600">
+            ×{p.multiplier}
+          </span>
+        )}
+      </td>
+    </tr>
   );
 }
 

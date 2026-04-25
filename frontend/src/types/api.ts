@@ -145,6 +145,39 @@ export interface MyTeamSwap {
   candidates: Recommendation[];
 }
 
+export interface MyTeamLiveSquadEntry {
+  player_id: number;
+  element: number;
+  web_name: string;
+  position: Position | "—";
+  team_short: string | null;
+  pick_position: number;
+  multiplier: number;
+  is_captain: boolean;
+  is_vice_captain: boolean;
+  is_starter: boolean;
+  raw_points: number;
+  points: number;
+  minutes: number;
+  goals_scored: number;
+  assists: number;
+  clean_sheets: number;
+  bonus: number;
+  bps: number;
+}
+
+export interface MyTeamLive {
+  team_id: number;
+  team_name: string | null;
+  gw: number;
+  finished: boolean;
+  data_checked: boolean;
+  live_points: number;
+  starters_played: number;
+  starters_total: number;
+  squad: MyTeamLiveSquadEntry[];
+}
+
 export interface MyTeam {
   team_id: number;
   team_name: string | null;
