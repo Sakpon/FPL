@@ -21,6 +21,7 @@
  *   GET /api/gurus/mentions/:gw?limit=
  *   GET /api/gurus/summary/:gw
  *   GET /api/team/:fplTeamId        (fetches from FPL public API, joins with D1)
+ *   GET /api/team/:fplTeamId/live   (live points for current GW, edge-cached 30s)
  */
 
 import { Hono } from "hono";
@@ -375,54 +376,56 @@ app.get("/api/team/:fplTeamId", async (c) => {
   }
 
   // Target GW = the upcoming GW we generate recommendations for.
-  const nextRow = await c.env.DB
-    .prepare("SELECT id FROM gameweeks WHERE is_next = 1 LIMIT 1")
-    .first<any>();
-  const currentRow = await c.env.DB
-    .prepare("SELECT id FROM gameweeks WHERE is_current = 1 LIMIT 1")
-    .first<any>();
+  // Single round-trip; partition is_next vs is_current in JS.
+  const { results: gwRows } = await c.env.DB
+    .prepare(
+      "SELECT id, is_next, is_current FROM gameweeks WHERE is_next = 1 OR is_current = 1"
+    )
+    .all<{ id: number; is_next: number; is_current: number }>();
+  const nextRow = (gwRows ?? []).find((r) => boolish(r.is_next)) ?? null;
+  const currentRow = (gwRows ?? []).find((r) => boolish(r.is_current)) ?? null;
   const targetGw: number | undefined = nextRow?.id ?? currentRow?.id;
   if (!targetGw) return c.json({ error: "No upcoming gameweek loaded" }, 500);
 
-  // Pull the entry (team name, rank, bank) + picks for target GW in parallel.
-  let entryResp: Response;
-  let picksResp: Response;
+  // Pull the entry (team name, rank, bank) + picks in parallel. Both are
+  // edge-cached so concurrent viewers and repeat visits within TTL collapse
+  // to a single upstream call per colo.
+  let entry: any;
+  let picks: any = null;
+  let picksGw = targetGw;
   try {
-    [entryResp, picksResp] = await Promise.all([
-      fetch(`${FPL_API}/entry/${teamId}/`, { headers: FPL_UA }),
-      fetch(`${FPL_API}/entry/${teamId}/event/${targetGw}/picks/`, { headers: FPL_UA }),
+    const [entryResult, picksResult] = await Promise.allSettled([
+      fetchEdgeCached(`${FPL_API}/entry/${teamId}/`, 120),
+      fetchEdgeCached(`${FPL_API}/entry/${teamId}/event/${targetGw}/picks/`, 60),
     ]);
+    if (entryResult.status === "rejected") {
+      const msg = String(entryResult.reason);
+      if (msg.includes("404")) return c.json({ error: "Team not found" }, 404);
+      return c.json({ error: "Could not reach FPL API", detail: msg }, 502);
+    }
+    entry = entryResult.value;
+    if (picksResult.status === "fulfilled") {
+      picks = picksResult.value;
+    }
   } catch (e: any) {
     return c.json({ error: "Could not reach FPL API", detail: String(e) }, 502);
   }
 
-  if (entryResp.status === 404) return c.json({ error: "Team not found" }, 404);
-  if (!entryResp.ok) {
-    return c.json({ error: "FPL API error", status: entryResp.status }, 502);
-  }
-  const entry: any = await entryResp.json();
-
   // Picks may not exist yet for the upcoming GW — fall back to the current
   // (finished) GW so we still have a squad to analyse.
-  let picks: any = null;
-  let picksGw = targetGw;
-  if (picksResp.ok) {
-    picks = await picksResp.json();
-  } else if (currentRow && currentRow.id !== targetGw) {
-    const r = await fetch(
-      `${FPL_API}/entry/${teamId}/event/${currentRow.id}/picks/`,
-      { headers: FPL_UA }
-    );
-    if (r.ok) {
-      picks = await r.json();
+  if (!picks && currentRow && currentRow.id !== targetGw) {
+    try {
+      picks = await fetchEdgeCached(
+        `${FPL_API}/entry/${teamId}/event/${currentRow.id}/picks/`,
+        60
+      );
       picksGw = currentRow.id;
+    } catch {
+      /* fall through to 404 below */
     }
   }
   if (!picks || !Array.isArray(picks.picks)) {
-    return c.json(
-      { error: "No saved picks for this team yet" },
-      404
-    );
+    return c.json({ error: "No saved picks for this team yet" }, 404);
   }
 
   const fplPicks: Array<{
@@ -528,19 +531,34 @@ app.get("/api/team/:fplTeamId", async (c) => {
   const squadIdPlaceholders = squadIdList.map(() => "?").join(",");
 
   const swap_suggestions: Array<{ out: SquadEntry; candidates: ReturnType<typeof shapeRec>[] }> = [];
-  for (const w of weakest) {
+  if (weakest.length > 0) {
+    // Single D1 query for all three weakest positions; partition + cap to 5
+    // per position in JS. Replaces the previous 3-round-trip loop.
+    const positions = Array.from(new Set(weakest.map((w) => w.position)));
+    const posPlaceholders = positions.map(() => "?").join(",");
     const { results } = await c.env.DB
       .prepare(
-        `${RECS_SELECT} WHERE r.gw = ? AND r.position = ?` +
+        `${RECS_SELECT} WHERE r.gw = ? AND r.position IN (${posPlaceholders})` +
         ` AND r.player_id NOT IN (${squadIdPlaceholders})` +
-        ` ORDER BY r.predicted_points DESC LIMIT 5`
+        ` ORDER BY r.position, r.predicted_points DESC`
       )
-      .bind(targetGw, w.position, ...squadIdList)
+      .bind(targetGw, ...positions, ...squadIdList)
       .all();
-    swap_suggestions.push({
-      out: w,
-      candidates: ((results as any[]) ?? []).map((r) => shapeRec(r as RecRow)),
-    });
+
+    const byPos = new Map<string, RecRow[]>();
+    for (const r of (results as RecRow[]) ?? []) {
+      const arr = byPos.get(r.position) ?? [];
+      if (arr.length < 5) {
+        arr.push(r);
+        byPos.set(r.position, arr);
+      }
+    }
+    for (const w of weakest) {
+      swap_suggestions.push({
+        out: w,
+        candidates: (byPos.get(w.position) ?? []).map((r) => shapeRec(r)),
+      });
+    }
   }
 
   return c.json({
@@ -565,6 +583,151 @@ app.get("/api/team/:fplTeamId", async (c) => {
       picksGw !== targetGw
         ? `Showing your GW${picksGw} squad — you have not saved a team for GW${targetGw} yet.`
         : null,
+  });
+});
+
+// ---------- Live tracking: per-player live stats during a GW ----------
+
+async function fetchEdgeCached(url: string, ttlSeconds: number): Promise<any> {
+  // Cloudflare's per-colo cache. Keyed by URL — same data shared across all
+  // viewers, so 100s of requests collapse into 1 upstream hit per `ttl`.
+  const cache = (caches as unknown as { default: Cache }).default;
+  const req = new Request(url, { headers: FPL_UA });
+  const hit = await cache.match(req);
+  if (hit) return hit.json();
+  const fresh = await fetch(req);
+  if (!fresh.ok) throw new Error(`upstream ${fresh.status} for ${url}`);
+  // Clone before reading json so we can also store the body.
+  const body = await fresh.clone().text();
+  const cached = new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": `public, max-age=${ttlSeconds}`,
+    },
+  });
+  await cache.put(req, cached);
+  return JSON.parse(body);
+}
+
+app.get("/api/team/:fplTeamId/live", async (c) => {
+  const teamId = Number(c.req.param("fplTeamId"));
+  if (!Number.isInteger(teamId) || teamId <= 0) {
+    return c.json({ error: "Invalid team id" }, 400);
+  }
+
+  // Resolve the current GW from FPL's bootstrap (60s edge cache).
+  let bootstrap: any;
+  try {
+    bootstrap = await fetchEdgeCached(`${FPL_API}/bootstrap-static/`, 60);
+  } catch (e: any) {
+    return c.json({ error: "FPL API unreachable", detail: String(e) }, 502);
+  }
+  const events: any[] = bootstrap.events ?? [];
+  const currentEvent = events.find((e) => e.is_current);
+  if (!currentEvent) {
+    return c.json({ error: "No current gameweek — no live data" }, 404);
+  }
+  const gw: number = currentEvent.id;
+
+  // All three FPL calls are edge-cached; the same cache key is shared with
+  // /api/team/:id so a poll of /live within TTL of the analyse call hits the
+  // cache. TTLs: bootstrap 60s, live stats 30s, entry 120s, picks 60s.
+  let entry: any, picks: any, liveStats: any;
+  try {
+    const [entryResult, picksResult, liveResult] = await Promise.allSettled([
+      fetchEdgeCached(`${FPL_API}/entry/${teamId}/`, 120),
+      fetchEdgeCached(`${FPL_API}/entry/${teamId}/event/${gw}/picks/`, 60),
+      fetchEdgeCached(`${FPL_API}/event/${gw}/live/`, 30),
+    ]);
+    if (entryResult.status === "rejected") {
+      const msg = String(entryResult.reason);
+      if (msg.includes("404")) return c.json({ error: "Team not found" }, 404);
+      return c.json({ error: "FPL API error", detail: msg }, 502);
+    }
+    entry = entryResult.value;
+    if (picksResult.status === "rejected") {
+      return c.json({ error: "No picks for current GW yet", gw }, 404);
+    }
+    picks = picksResult.value;
+    if (liveResult.status === "rejected") {
+      return c.json(
+        { error: "FPL API error", detail: String(liveResult.reason) },
+        502
+      );
+    }
+    liveStats = liveResult.value;
+  } catch (e: any) {
+    return c.json({ error: "FPL API error", detail: String(e) }, 502);
+  }
+
+  const elementStats = new Map<number, any>();
+  for (const e of liveStats.elements ?? []) {
+    elementStats.set(e.id, e.stats ?? {});
+  }
+
+  const fplPicks: Array<{
+    element: number; position: number; multiplier: number;
+    is_captain: boolean; is_vice_captain: boolean;
+  }> = picks.picks ?? [];
+
+  // D1 lookup for player metadata (name, team, position).
+  const playerIds = fplPicks.map((p) => LIVE_PID_OFFSET + p.element);
+  const placeholders = playerIds.map(() => "?").join(",");
+  const { results: pRes } = playerIds.length
+    ? await c.env.DB
+        .prepare(`SELECT * FROM players WHERE id IN (${placeholders})`)
+        .bind(...playerIds)
+        .all()
+    : { results: [] };
+  const playerById = new Map<number, ReturnType<typeof shapePlayer>>();
+  for (const p of (pRes as any[]) ?? []) {
+    playerById.set(p.id, shapePlayer(p as PlayerRow));
+  }
+
+  const squad = fplPicks.map((fp) => {
+    const pid = LIVE_PID_OFFSET + fp.element;
+    const stats = elementStats.get(fp.element) ?? {};
+    const player = playerById.get(pid);
+    const rawPoints = Number(stats.total_points ?? 0);
+    const multiplier = fp.multiplier ?? 1;
+    const isStarter = fp.position <= 11;
+    return {
+      player_id: pid,
+      element: fp.element,
+      web_name: player?.web_name ?? `#${fp.element}`,
+      position: player?.position ?? "—",
+      team_short: player?.team_short ?? null,
+      pick_position: fp.position,
+      multiplier,
+      is_captain: fp.is_captain,
+      is_vice_captain: fp.is_vice_captain,
+      is_starter: isStarter,
+      raw_points: rawPoints,
+      points: isStarter ? rawPoints * multiplier : 0,
+      minutes: Number(stats.minutes ?? 0),
+      goals_scored: Number(stats.goals_scored ?? 0),
+      assists: Number(stats.assists ?? 0),
+      clean_sheets: Number(stats.clean_sheets ?? 0),
+      bonus: Number(stats.bonus ?? 0),
+      bps: Number(stats.bps ?? 0),
+    };
+  });
+
+  const livePoints = squad.reduce((s, p) => s + p.points, 0);
+  const startersPlayed = squad.filter((p) => p.is_starter && p.minutes > 0).length;
+  const startersTotal = squad.filter((p) => p.is_starter).length;
+
+  return c.json({
+    team_id: teamId,
+    team_name: entry.name ?? null,
+    gw,
+    finished: !!currentEvent.finished,
+    data_checked: !!currentEvent.data_checked,
+    live_points: livePoints,
+    starters_played: startersPlayed,
+    starters_total: startersTotal,
+    squad,
   });
 });
 

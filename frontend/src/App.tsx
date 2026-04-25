@@ -1,4 +1,5 @@
-import { Routes, Route, NavLink, Link } from "react-router-dom";
+import { useState } from "react";
+import { Routes, Route, NavLink, Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Users,
@@ -6,7 +7,10 @@ import {
   Megaphone,
   LineChart,
   UserCircle,
+  Menu,
+  X,
 } from "lucide-react";
+import { useEffect } from "react";
 import { cn } from "@/lib/utils";
 import Dashboard from "@/pages/Dashboard";
 import BestXI from "@/pages/BestXI";
@@ -40,7 +44,7 @@ export default function App() {
           <Route path="/history" element={<History />} />
         </Routes>
       </div>
-      <footer className="py-10 text-center text-xs text-ink-500">
+      <footer className="py-10 px-4 text-center text-xs text-ink-500">
         Predictions are probabilistic, not guarantees. Built with LightGBM on 3
         seasons of FPL data plus top-10 guru sentiment.
       </footer>
@@ -49,16 +53,33 @@ export default function App() {
 }
 
 function Header() {
+  const [open, setOpen] = useState(false);
+  const location = useLocation();
+
+  // Close drawer when navigating
+  useEffect(() => setOpen(false), [location.pathname]);
+
+  // Lock background scroll while drawer is open
+  useEffect(() => {
+    if (open) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = prev;
+      };
+    }
+  }, [open]);
+
   return (
     <header className="sticky top-0 z-30 border-b border-ink-200/80 bg-white/80 backdrop-blur">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
-        <Link to="/" className="flex items-center gap-3">
-          <div className="h-9 w-9 rounded-xl bg-pitch-hero bg-pitch-600 grid place-items-center text-white font-bold shadow-card">
+        <Link to="/" className="flex items-center gap-3 min-w-0">
+          <div className="h-9 w-9 shrink-0 rounded-xl bg-pitch-hero bg-pitch-600 grid place-items-center text-white font-bold shadow-card">
             F
           </div>
-          <div className="leading-tight">
-            <div className="font-semibold tracking-tight">FPL Oracle</div>
-            <div className="text-[11px] text-ink-500">
+          <div className="leading-tight min-w-0">
+            <div className="font-semibold tracking-tight truncate">FPL Oracle</div>
+            <div className="text-[11px] text-ink-500 truncate">
               Data-driven picks · updated every gameweek
             </div>
           </div>
@@ -78,21 +99,62 @@ function Header() {
             </NavLink>
           ))}
         </nav>
-        <div className="md:hidden">
-          <select
-            className="nav-link border border-ink-200"
-            onChange={(e) => {
-              if (e.target.value) window.location.assign(e.target.value);
-            }}
-          >
-            {NAV.map((n) => (
-              <option key={n.to} value={n.to}>
-                {n.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        <button
+          type="button"
+          aria-label="Open menu"
+          className="md:hidden inline-flex items-center justify-center h-10 w-10 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 active:scale-95 transition"
+          onClick={() => setOpen(true)}
+        >
+          <Menu className="h-5 w-5" />
+        </button>
       </div>
+
+      {open && <MobileNavDrawer onClose={() => setOpen(false)} />}
     </header>
+  );
+}
+
+function MobileNavDrawer({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="md:hidden fixed inset-0 z-40">
+      <div
+        className="absolute inset-0 bg-ink-900/40 backdrop-blur-sm"
+        onClick={onClose}
+        aria-hidden
+      />
+      <aside className="absolute right-0 top-0 h-full w-[78%] max-w-xs bg-white shadow-pop flex flex-col">
+        <div className="h-16 flex items-center justify-between px-4 border-b border-ink-200">
+          <span className="font-semibold tracking-tight">Menu</span>
+          <button
+            type="button"
+            aria-label="Close menu"
+            className="inline-flex items-center justify-center h-10 w-10 rounded-lg text-ink-700 hover:bg-ink-100 active:scale-95 transition"
+            onClick={onClose}
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <nav className="flex-1 overflow-y-auto p-2">
+          {NAV.map(({ to, label, icon: Icon, end }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={end}
+              className={({ isActive }) =>
+                cn(
+                  "flex items-center gap-3 px-3 py-3 rounded-xl text-base font-medium",
+                  isActive
+                    ? "bg-ink-900 text-white"
+                    : "text-ink-700 hover:bg-ink-100"
+                )
+              }
+            >
+              <Icon className="h-5 w-5" />
+              <span>{label}</span>
+            </NavLink>
+          ))}
+        </nav>
+      </aside>
+    </div>
   );
 }
