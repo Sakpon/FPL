@@ -10,7 +10,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import Player
+from app.db.models import Fixture, Player
 from app.ml.features import build_matrix
 
 MODEL_DIR: Path = settings.model_dir
@@ -53,12 +53,52 @@ def predict_for_gw(db: Session, target_gw: int, target_season: str = "live") -> 
     injured / doubtful players fall down the ranking naturally.
     """
     fm = build_matrix(db)
-    mask = (fm.meta["season"] == target_season) & (fm.meta["gw"] == target_gw)
+
+    # Restrict to teams that actually have a fixture in target_gw. Without
+    # this, the latest-row fallback below leaks blank-GW players (no fixture
+    # this week) into recommendations using their last-played stats.
+    fixture_rows = (
+        db.query(Fixture.home_team_id, Fixture.away_team_id)
+        .filter(Fixture.season == target_season, Fixture.gw == target_gw)
+        .all()
+    )
+    playing_team_ids: set[int] = set()
+    for h, a in fixture_rows:
+        if h is not None:
+            playing_team_ids.add(h)
+        if a is not None:
+            playing_team_ids.add(a)
+
+    if playing_team_ids:
+        team_map = {
+            pid: tid for pid, tid in db.query(Player.id, Player.team_id).all()
+        }
+        plays = (
+            fm.meta["player_id"].map(team_map).isin(playing_team_ids).fillna(False)
+        )
+        print(
+            f"[predict] target_gw={target_gw} season={target_season} "
+            f"teams_with_fixture={len(playing_team_ids)} "
+            f"players_eligible={int(plays.sum())}"
+        )
+    else:
+        # No fixtures known for this GW — don't filter (avoids returning empty).
+        plays = pd.Series(True, index=fm.meta.index)
+        print(
+            f"[predict] target_gw={target_gw} season={target_season} "
+            f"no fixture rows found, skipping team filter"
+        )
+
+    mask = (
+        (fm.meta["season"] == target_season)
+        & (fm.meta["gw"] == target_gw)
+        & plays
+    )
 
     if not mask.any():
         # fallback: use latest available GW row per player to generate a forecast
         latest = (
-            fm.meta[fm.meta["season"] == target_season]
+            fm.meta[(fm.meta["season"] == target_season) & plays]
             .sort_values(["player_id", "gw"])
             .groupby("player_id")
             .tail(1)
