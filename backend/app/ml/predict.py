@@ -10,10 +10,15 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.models import Player
 from app.ml.features import build_matrix
 
 MODEL_DIR: Path = settings.model_dir
 POSITIONS = ("GK", "DEF", "MID", "FWD")
+
+# status codes that mean "will not play this GW" if chance_of_playing is None/0.
+# 'a' available, 'd' doubtful, 'i' injured, 's' suspended, 'u' unavailable, 'n' not in squad.
+UNAVAILABLE_STATUSES = {"i", "s", "u", "n"}
 
 
 def _load(pos: str, prefix: str):
@@ -23,12 +28,29 @@ def _load(pos: str, prefix: str):
     return joblib.load(path)
 
 
+def _availability_factor(status: str | None, chance: int | None) -> float:
+    """Return the multiplicative factor to apply to predicted points.
+
+    Logic:
+      - chance_of_playing in [0, 100] → use as-is (0 = out).
+      - chance None but status in UNAVAILABLE_STATUSES → treat as 0.
+      - otherwise → 1.0 (fully available).
+    """
+    if chance is not None:
+        return max(0.0, min(float(chance), 100.0)) / 100.0
+    if status and status.lower() in UNAVAILABLE_STATUSES:
+        return 0.0
+    return 1.0
+
+
 def predict_for_gw(db: Session, target_gw: int, target_season: str = "live") -> pd.DataFrame:
     """Build predictions for (target_season, target_gw).
 
     We construct features for ALL rows available and filter to the target row
     per player at the end. The rolling features for target_gw use prior GWs,
     so prediction is valid even if no PlayerGWStats row exists yet for target_gw.
+    Raw model output is scaled by the player's chance_of_playing_next_round so
+    injured / doubtful players fall down the ranking naturally.
     """
     fm = build_matrix(db)
     mask = (fm.meta["season"] == target_season) & (fm.meta["gw"] == target_gw)
@@ -42,6 +64,10 @@ def predict_for_gw(db: Session, target_gw: int, target_season: str = "live") -> 
             .tail(1)
         )
         mask = fm.meta.index.isin(latest.index)
+
+    # Pull availability for every player we might predict for — cheap dict lookup.
+    avail_rows = db.query(Player.id, Player.status, Player.chance_of_playing).all()
+    avail = {pid: (status, chance) for pid, status, chance in avail_rows}
 
     preds_frames = []
     for pos in POSITIONS:
@@ -62,6 +88,21 @@ def predict_for_gw(db: Session, target_gw: int, target_season: str = "live") -> 
         mean = np.clip(mean, 0, None)
         p10 = np.clip(p10, 0, None)
         p90 = np.clip(p90, 0, None)
+
+        pids = meta["player_id"].values
+        factor = np.array([
+            _availability_factor(*avail.get(int(pid), (None, None))) for pid in pids
+        ])
+        mean = mean * factor
+        p10 = p10 * factor
+        p90 = p90 * factor
+        statuses = np.array(
+            [avail.get(int(pid), (None, None))[0] or "a" for pid in pids]
+        )
+        chances = np.array(
+            [avail.get(int(pid), (None, None))[1] for pid in pids], dtype=object
+        )
+
         social = X.get("social_weighted_sentiment")
         social_arr = social.values if social is not None else np.zeros(len(X))
         frame = pd.DataFrame({
@@ -73,6 +114,9 @@ def predict_for_gw(db: Session, target_gw: int, target_season: str = "live") -> 
             "p10": p10,
             "p90": p90,
             "social_score": social_arr,
+            "status": statuses,
+            "chance_of_playing": chances,
+            "availability_factor": factor,
         })
         frame["rank_in_position"] = (
             frame["predicted_points"].rank(ascending=False, method="min").astype(int)

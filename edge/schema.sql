@@ -25,7 +25,12 @@ CREATE TABLE players (
   form REAL NOT NULL,
   total_points INTEGER NOT NULL,
   selected_by_percent REAL NOT NULL,
-  news TEXT
+  news TEXT,
+  status TEXT DEFAULT 'a',
+  chance_of_playing INTEGER,
+  next_opp_short TEXT,
+  next_was_home INTEGER,
+  next_difficulty INTEGER
 );
 CREATE INDEX idx_players_position ON players(position);
 CREATE INDEX idx_players_team ON players(team_id);

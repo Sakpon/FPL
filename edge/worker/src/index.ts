@@ -45,6 +45,9 @@ type PlayerRow = {
   position: string; team_id: number; team_short: string | null;
   team_name: string | null; price: number; form: number;
   total_points: number; selected_by_percent: number; news: string | null;
+  status: string | null; chance_of_playing: number | null;
+  next_opp_short: string | null; next_was_home: number | null;
+  next_difficulty: number | null;
 };
 
 type RecRow = {
@@ -53,6 +56,10 @@ type RecRow = {
   rank_in_position: number; is_top_pick: number; is_captain: number;
   in_best_xi: number; social_score: number;
   web_name: string; team_short: string | null; price: number;
+  news: string | null; status: string | null;
+  chance_of_playing: number | null;
+  next_opp_short: string | null; next_was_home: number | null;
+  next_difficulty: number | null;
 };
 
 function shapeRec(row: RecRow) {
@@ -70,6 +77,13 @@ function shapeRec(row: RecRow) {
     is_captain: boolish(row.is_captain),
     in_best_xi: boolish(row.in_best_xi),
     social_score: Number(row.social_score.toFixed(2)),
+    status: row.status ?? "a",
+    chance_of_playing: row.chance_of_playing,
+    news: row.news ?? "",
+    next_opp_short: row.next_opp_short,
+    next_was_home:
+      row.next_was_home == null ? null : boolish(row.next_was_home),
+    next_difficulty: row.next_difficulty,
   };
 }
 
@@ -88,6 +102,12 @@ function shapePlayer(p: PlayerRow) {
     total_points: p.total_points,
     selected_by_percent: p.selected_by_percent,
     news: p.news,
+    status: p.status ?? "a",
+    chance_of_playing: p.chance_of_playing,
+    next_opp_short: p.next_opp_short,
+    next_was_home:
+      p.next_was_home == null ? null : boolish(p.next_was_home),
+    next_difficulty: p.next_difficulty,
   };
 }
 
@@ -177,7 +197,9 @@ app.get("/api/players/:id/history", async (c) => {
 });
 
 const RECS_SELECT =
-  "SELECT r.*, p.web_name, p.team_short, p.price" +
+  "SELECT r.*, p.web_name, p.team_short, p.price," +
+  "       p.news, p.status, p.chance_of_playing," +
+  "       p.next_opp_short, p.next_was_home, p.next_difficulty" +
   " FROM recommendations r JOIN players p ON r.player_id = p.id";
 
 app.get("/api/recommendations/top-picks/:gw", async (c) => {
@@ -335,6 +357,12 @@ type SquadEntry = {
   p90: number | null;
   rank_in_position: number | null;
   social_score: number | null;
+  status: string;
+  chance_of_playing: number | null;
+  news: string;
+  next_opp_short: string | null;
+  next_was_home: boolean | null;
+  next_difficulty: number | null;
   fpl_multiplier: number;
   fpl_is_captain: boolean;
   fpl_is_vice_captain: boolean;
@@ -438,6 +466,13 @@ app.get("/api/team/:fplTeamId", async (c) => {
       p90: rec?.p90 ?? null,
       rank_in_position: rec?.rank_in_position ?? null,
       social_score: rec?.social_score ?? null,
+      status: rec?.status ?? player?.status ?? "a",
+      chance_of_playing:
+        rec?.chance_of_playing ?? player?.chance_of_playing ?? null,
+      news: (rec?.news ?? player?.news ?? "") as string,
+      next_opp_short: rec?.next_opp_short ?? player?.next_opp_short ?? null,
+      next_was_home: rec?.next_was_home ?? player?.next_was_home ?? null,
+      next_difficulty: rec?.next_difficulty ?? player?.next_difficulty ?? null,
       fpl_multiplier: fp.multiplier,
       fpl_is_captain: fp.is_captain,
       fpl_is_vice_captain: fp.is_vice_captain,
