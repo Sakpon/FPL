@@ -376,54 +376,56 @@ app.get("/api/team/:fplTeamId", async (c) => {
   }
 
   // Target GW = the upcoming GW we generate recommendations for.
-  const nextRow = await c.env.DB
-    .prepare("SELECT id FROM gameweeks WHERE is_next = 1 LIMIT 1")
-    .first<any>();
-  const currentRow = await c.env.DB
-    .prepare("SELECT id FROM gameweeks WHERE is_current = 1 LIMIT 1")
-    .first<any>();
+  // Single round-trip; partition is_next vs is_current in JS.
+  const { results: gwRows } = await c.env.DB
+    .prepare(
+      "SELECT id, is_next, is_current FROM gameweeks WHERE is_next = 1 OR is_current = 1"
+    )
+    .all<{ id: number; is_next: number; is_current: number }>();
+  const nextRow = (gwRows ?? []).find((r) => boolish(r.is_next)) ?? null;
+  const currentRow = (gwRows ?? []).find((r) => boolish(r.is_current)) ?? null;
   const targetGw: number | undefined = nextRow?.id ?? currentRow?.id;
   if (!targetGw) return c.json({ error: "No upcoming gameweek loaded" }, 500);
 
-  // Pull the entry (team name, rank, bank) + picks for target GW in parallel.
-  let entryResp: Response;
-  let picksResp: Response;
+  // Pull the entry (team name, rank, bank) + picks in parallel. Both are
+  // edge-cached so concurrent viewers and repeat visits within TTL collapse
+  // to a single upstream call per colo.
+  let entry: any;
+  let picks: any = null;
+  let picksGw = targetGw;
   try {
-    [entryResp, picksResp] = await Promise.all([
-      fetch(`${FPL_API}/entry/${teamId}/`, { headers: FPL_UA }),
-      fetch(`${FPL_API}/entry/${teamId}/event/${targetGw}/picks/`, { headers: FPL_UA }),
+    const [entryResult, picksResult] = await Promise.allSettled([
+      fetchEdgeCached(`${FPL_API}/entry/${teamId}/`, 120),
+      fetchEdgeCached(`${FPL_API}/entry/${teamId}/event/${targetGw}/picks/`, 60),
     ]);
+    if (entryResult.status === "rejected") {
+      const msg = String(entryResult.reason);
+      if (msg.includes("404")) return c.json({ error: "Team not found" }, 404);
+      return c.json({ error: "Could not reach FPL API", detail: msg }, 502);
+    }
+    entry = entryResult.value;
+    if (picksResult.status === "fulfilled") {
+      picks = picksResult.value;
+    }
   } catch (e: any) {
     return c.json({ error: "Could not reach FPL API", detail: String(e) }, 502);
   }
 
-  if (entryResp.status === 404) return c.json({ error: "Team not found" }, 404);
-  if (!entryResp.ok) {
-    return c.json({ error: "FPL API error", status: entryResp.status }, 502);
-  }
-  const entry: any = await entryResp.json();
-
   // Picks may not exist yet for the upcoming GW — fall back to the current
   // (finished) GW so we still have a squad to analyse.
-  let picks: any = null;
-  let picksGw = targetGw;
-  if (picksResp.ok) {
-    picks = await picksResp.json();
-  } else if (currentRow && currentRow.id !== targetGw) {
-    const r = await fetch(
-      `${FPL_API}/entry/${teamId}/event/${currentRow.id}/picks/`,
-      { headers: FPL_UA }
-    );
-    if (r.ok) {
-      picks = await r.json();
+  if (!picks && currentRow && currentRow.id !== targetGw) {
+    try {
+      picks = await fetchEdgeCached(
+        `${FPL_API}/entry/${teamId}/event/${currentRow.id}/picks/`,
+        60
+      );
       picksGw = currentRow.id;
+    } catch {
+      /* fall through to 404 below */
     }
   }
   if (!picks || !Array.isArray(picks.picks)) {
-    return c.json(
-      { error: "No saved picks for this team yet" },
-      404
-    );
+    return c.json({ error: "No saved picks for this team yet" }, 404);
   }
 
   const fplPicks: Array<{
@@ -529,19 +531,34 @@ app.get("/api/team/:fplTeamId", async (c) => {
   const squadIdPlaceholders = squadIdList.map(() => "?").join(",");
 
   const swap_suggestions: Array<{ out: SquadEntry; candidates: ReturnType<typeof shapeRec>[] }> = [];
-  for (const w of weakest) {
+  if (weakest.length > 0) {
+    // Single D1 query for all three weakest positions; partition + cap to 5
+    // per position in JS. Replaces the previous 3-round-trip loop.
+    const positions = Array.from(new Set(weakest.map((w) => w.position)));
+    const posPlaceholders = positions.map(() => "?").join(",");
     const { results } = await c.env.DB
       .prepare(
-        `${RECS_SELECT} WHERE r.gw = ? AND r.position = ?` +
+        `${RECS_SELECT} WHERE r.gw = ? AND r.position IN (${posPlaceholders})` +
         ` AND r.player_id NOT IN (${squadIdPlaceholders})` +
-        ` ORDER BY r.predicted_points DESC LIMIT 5`
+        ` ORDER BY r.position, r.predicted_points DESC`
       )
-      .bind(targetGw, w.position, ...squadIdList)
+      .bind(targetGw, ...positions, ...squadIdList)
       .all();
-    swap_suggestions.push({
-      out: w,
-      candidates: ((results as any[]) ?? []).map((r) => shapeRec(r as RecRow)),
-    });
+
+    const byPos = new Map<string, RecRow[]>();
+    for (const r of (results as RecRow[]) ?? []) {
+      const arr = byPos.get(r.position) ?? [];
+      if (arr.length < 5) {
+        arr.push(r);
+        byPos.set(r.position, arr);
+      }
+    }
+    for (const w of weakest) {
+      swap_suggestions.push({
+        out: w,
+        candidates: (byPos.get(w.position) ?? []).map((r) => shapeRec(r)),
+      });
+    }
   }
 
   return c.json({
@@ -613,29 +630,33 @@ app.get("/api/team/:fplTeamId/live", async (c) => {
   }
   const gw: number = currentEvent.id;
 
-  // Pull picks and live stats in parallel; live stats cached 30s edge-side.
+  // All three FPL calls are edge-cached; the same cache key is shared with
+  // /api/team/:id so a poll of /live within TTL of the analyse call hits the
+  // cache. TTLs: bootstrap 60s, live stats 30s, entry 120s, picks 60s.
   let entry: any, picks: any, liveStats: any;
   try {
-    const [entryResp, picksResp, live] = await Promise.all([
-      fetch(`${FPL_API}/entry/${teamId}/`, { headers: FPL_UA }),
-      fetch(`${FPL_API}/entry/${teamId}/event/${gw}/picks/`, { headers: FPL_UA }),
+    const [entryResult, picksResult, liveResult] = await Promise.allSettled([
+      fetchEdgeCached(`${FPL_API}/entry/${teamId}/`, 120),
+      fetchEdgeCached(`${FPL_API}/entry/${teamId}/event/${gw}/picks/`, 60),
       fetchEdgeCached(`${FPL_API}/event/${gw}/live/`, 30),
     ]);
-    if (entryResp.status === 404) {
-      return c.json({ error: "Team not found" }, 404);
+    if (entryResult.status === "rejected") {
+      const msg = String(entryResult.reason);
+      if (msg.includes("404")) return c.json({ error: "Team not found" }, 404);
+      return c.json({ error: "FPL API error", detail: msg }, 502);
     }
-    if (!entryResp.ok) {
-      return c.json({ error: "FPL API error", status: entryResp.status }, 502);
+    entry = entryResult.value;
+    if (picksResult.status === "rejected") {
+      return c.json({ error: "No picks for current GW yet", gw }, 404);
     }
-    entry = await entryResp.json();
-    if (!picksResp.ok) {
+    picks = picksResult.value;
+    if (liveResult.status === "rejected") {
       return c.json(
-        { error: "No picks for current GW yet", gw },
-        404
+        { error: "FPL API error", detail: String(liveResult.reason) },
+        502
       );
     }
-    picks = await picksResp.json();
-    liveStats = live;
+    liveStats = liveResult.value;
   } catch (e: any) {
     return c.json({ error: "FPL API error", detail: String(e) }, 502);
   }
