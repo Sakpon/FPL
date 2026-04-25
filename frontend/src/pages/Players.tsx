@@ -31,24 +31,24 @@ export default function Players() {
             actual points.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full md:w-auto">
+          <div className="relative w-full sm:w-56">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-400" />
             <input
               placeholder="Search player"
-              className="pl-9 pr-3 py-2 rounded-lg border border-ink-200 bg-white text-sm w-56
+              className="w-full pl-9 pr-3 py-2 rounded-lg border border-ink-200 bg-white text-sm
                          focus:outline-none focus:ring-2 focus:ring-pitch-500/40"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
           </div>
-          <div className="flex rounded-lg border border-ink-200 bg-white p-0.5">
+          <div className="flex rounded-lg border border-ink-200 bg-white p-0.5 overflow-x-auto">
             {POSITIONS.map((p) => (
               <button
                 key={p}
                 onClick={() => setPos(p)}
                 className={cn(
-                  "px-3 py-1.5 text-xs font-medium rounded-md transition",
+                  "px-3 py-1.5 text-xs font-medium rounded-md transition shrink-0",
                   pos === p
                     ? "bg-ink-900 text-white"
                     : "text-ink-500 hover:text-ink-900"
