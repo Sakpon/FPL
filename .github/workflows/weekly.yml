@@ -1,21 +1,102 @@
 name: Weekly retrain + push to Cloudflare
 
 on:
-  # Thursday 09:00 UTC — gives headroom before typical Friday/Saturday deadlines
+  # Daily at 09:00 UTC. The `decide` job below queries the live FPL API and
+  # only proceeds when the next GW deadline is 12–36h away, so the heavy
+  # pipeline runs exactly once per GW regardless of weekday.
   schedule:
-    - cron: "0 9 * * 4"
+    - cron: "0 9 * * *"
   workflow_dispatch:
     inputs:
       target_gw:
-        description: "Gameweek to generate recommendations for"
-        required: true
-        default: "35"
+        description: "Gameweek to generate recommendations for (leave blank to auto-detect)"
+        required: false
+        default: ""
 
 env:
   PYTHONPATH: backend
 
 jobs:
+  decide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      target_gw: ${{ steps.gate.outputs.target_gw }}
+    steps:
+      - name: Resolve next GW + decide whether to run
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_GW: ${{ github.event.inputs.target_gw }}
+        run: |
+          set -euo pipefail
+          # Default fallback if API or parsing fails — the main job has its
+          # own seed fallback so missing a precise target won't break a deploy.
+          FALLBACK_GW=35
+
+          payload=$(curl -fsS https://fantasy.premierleague.com/api/bootstrap-static/ || echo "")
+
+          parse=$(printf '%s' "$payload" | python3 - <<'PY' || true
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+          except Exception:
+              sys.exit(0)
+          for e in data.get("events", []):
+              if e.get("is_next"):
+                  print(f'{e["id"]}|{e.get("deadline_time","")}')
+                  break
+          PY
+          )
+
+          api_gw=""
+          api_iso=""
+          if [ -n "$parse" ]; then
+            api_gw="${parse%%|*}"
+            api_iso="${parse##*|}"
+            echo "FPL is_next: GW${api_gw} deadline=${api_iso}"
+          else
+            echo "Could not parse FPL bootstrap (api unreachable or no is_next)"
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Manual run always proceeds; honour input override, else use API,
+            # else fallback constant.
+            target="${INPUT_GW:-}"
+            if [ -z "$target" ]; then target="${api_gw:-$FALLBACK_GW}"; fi
+            echo "Manual dispatch → run=true target_gw=${target}"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "target_gw=${target}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Scheduled run: only fire inside a 12–36h pre-deadline window.
+          if [ -z "$api_iso" ] || [ -z "$api_gw" ]; then
+            echo "No deadline info; skipping scheduled run"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "target_gw=${FALLBACK_GW}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          target_ts=$(date -u -d "$api_iso" +%s)
+          now_ts=$(date -u +%s)
+          hours=$(( (target_ts - now_ts) / 3600 ))
+          echo "Hours until deadline: ${hours}"
+
+          if [ "$hours" -ge 12 ] && [ "$hours" -lt 36 ]; then
+            echo "Inside 12–36h window → run=true"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "target_gw=${api_gw}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Outside window → skip"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "target_gw=${api_gw}" >> "$GITHUB_OUTPUT"
+          fi
+
   retrain-and-push:
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -206,7 +287,7 @@ jobs:
       - name: Generate recommendations for upcoming GW
         working-directory: backend
         env:
-          TARGET_GW: ${{ github.event.inputs.target_gw || '35' }}
+          TARGET_GW: ${{ needs.decide.outputs.target_gw }}
         run: |
           python -c "
           import os
