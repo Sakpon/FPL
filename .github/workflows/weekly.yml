@@ -37,18 +37,14 @@ jobs:
 
           payload=$(curl -fsS https://fantasy.premierleague.com/api/bootstrap-static/ || echo "")
 
-          parse=$(printf '%s' "$payload" | python3 - <<'PY' || true
-          import json, sys
-          try:
-              data = json.load(sys.stdin)
-          except Exception:
-              sys.exit(0)
-          for e in data.get("events", []):
-              if e.get("is_next"):
-                  print(f'{e["id"]}|{e.get("deadline_time","")}')
-                  break
-          PY
-          )
+          # Parse with jq (pre-installed on ubuntu-latest). Avoids a python
+          # heredoc which had a bash-parser conflict with `|| true`.
+          parse=""
+          if [ -n "$payload" ]; then
+            parse=$(printf '%s' "$payload" \
+              | jq -r '.events[] | select(.is_next) | "\(.id)|\(.deadline_time)"' \
+              2>/dev/null) || parse=""
+          fi
 
           api_gw=""
           api_iso=""
