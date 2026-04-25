@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Routes, Route, NavLink, Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -10,7 +11,6 @@ import {
   Menu,
   X,
 } from "lucide-react";
-import { useEffect } from "react";
 import { cn } from "@/lib/utils";
 import Dashboard from "@/pages/Dashboard";
 import BestXI from "@/pages/BestXI";
@@ -115,12 +115,17 @@ function Header() {
 }
 
 function MobileNavDrawer({ onClose }: { onClose: () => void }) {
-  return (
-    <div className="md:hidden fixed inset-0 z-40">
-      <div
-        className="absolute inset-0 bg-ink-900/40 backdrop-blur-sm"
+  // Render via a portal so the fixed-positioned drawer escapes the sticky
+  // header's stacking context. Without this, some mobile browsers clip the
+  // overlay or fail to deliver touch events to the backdrop.
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div className="md:hidden fixed inset-0 z-50">
+      <button
+        type="button"
+        aria-label="Close menu"
+        className="absolute inset-0 w-full h-full bg-ink-900/40 backdrop-blur-sm cursor-pointer"
         onClick={onClose}
-        aria-hidden
       />
       <aside className="absolute right-0 top-0 h-full w-[78%] max-w-xs bg-white shadow-pop flex flex-col">
         <div className="h-16 flex items-center justify-between px-4 border-b border-ink-200">
@@ -155,6 +160,7 @@ function MobileNavDrawer({ onClose }: { onClose: () => void }) {
           ))}
         </nav>
       </aside>
-    </div>
+    </div>,
+    document.body
   );
 }
