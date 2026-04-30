@@ -207,17 +207,39 @@ def export() -> Path:
         )
 
         recs = db.query(Recommendation).filter(Recommendation.season == "live").all()
-        rec_rows = [
-            [
+
+        # Belt-and-suspenders: drop any recommendation whose player's team
+        # has no fixture in that GW. predict.py already filters this at
+        # train/predict time but stale rows from earlier runs could survive
+        # in D1, and a fresh run on a partial fixtures table could leak
+        # blanks. Build (gw -> set(team_id)) once.
+        gw_team_fixtures: dict[int, set[int]] = {}
+        for f in (
+            db.query(Fixture).filter(Fixture.season == "live").all()
+        ):
+            gw_team_fixtures.setdefault(f.gw, set()).update(
+                tid for tid in (f.home_team_id, f.away_team_id) if tid is not None
+            )
+        player_team = {p.id: p.team_id for p in players}
+
+        rec_rows = []
+        skipped_blank = 0
+        for r in recs:
+            tid = player_team.get(r.player_id)
+            playing = gw_team_fixtures.get(r.gw, set())
+            if tid is None or (playing and tid not in playing):
+                skipped_blank += 1
+                continue
+            rec_rows.append([
                 r.gw, r.season, r.player_id, r.position,
                 round(float(r.predicted_points), 4),
                 round(float(r.p10), 4), round(float(r.p90), 4),
                 r.rank_in_position, int(bool(r.is_top_pick)),
                 int(bool(r.is_captain)), int(bool(r.in_best_xi)),
                 round(float(r.social_score), 4),
-            ]
-            for r in recs
-        ]
+            ])
+        if skipped_blank:
+            print(f"[export] skipped {skipped_blank} recs (blank-GW players)")
         _insert_many(
             lines, "recommendations",
             [
