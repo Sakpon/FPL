@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Routes, Route, NavLink, Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -10,7 +10,6 @@ import {
   Menu,
   X,
 } from "lucide-react";
-import { useEffect } from "react";
 import { cn } from "@/lib/utils";
 import Dashboard from "@/pages/Dashboard";
 import BestXI from "@/pages/BestXI";
@@ -56,22 +55,11 @@ function Header() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
 
-  // Close drawer when navigating
+  // Auto-collapse the inline mobile menu when route changes.
   useEffect(() => setOpen(false), [location.pathname]);
 
-  // Lock background scroll while drawer is open
-  useEffect(() => {
-    if (open) {
-      const prev = document.body.style.overflow;
-      document.body.style.overflow = "hidden";
-      return () => {
-        document.body.style.overflow = prev;
-      };
-    }
-  }, [open]);
-
   return (
-    <header className="sticky top-0 z-30 border-b border-ink-200/80 bg-white/80 backdrop-blur">
+    <header className="sticky top-0 z-30 border-b border-ink-200/80 bg-white/95 backdrop-blur">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
         <Link to="/" className="flex items-center gap-3 min-w-0">
           <div className="h-9 w-9 shrink-0 rounded-xl bg-pitch-hero bg-pitch-600 grid place-items-center text-white font-bold shadow-card">
@@ -101,40 +89,17 @@ function Header() {
         </nav>
         <button
           type="button"
-          aria-label="Open menu"
+          aria-label={open ? "Close menu" : "Open menu"}
+          aria-expanded={open}
           className="md:hidden inline-flex items-center justify-center h-10 w-10 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 active:scale-95 transition"
-          onClick={() => setOpen(true)}
+          onClick={() => setOpen((v) => !v)}
         >
-          <Menu className="h-5 w-5" />
+          {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
       </div>
 
-      {open && <MobileNavDrawer onClose={() => setOpen(false)} />}
-    </header>
-  );
-}
-
-function MobileNavDrawer({ onClose }: { onClose: () => void }) {
-  return (
-    <div className="md:hidden fixed inset-0 z-40">
-      <div
-        className="absolute inset-0 bg-ink-900/40 backdrop-blur-sm"
-        onClick={onClose}
-        aria-hidden
-      />
-      <aside className="absolute right-0 top-0 h-full w-[78%] max-w-xs bg-white shadow-pop flex flex-col">
-        <div className="h-16 flex items-center justify-between px-4 border-b border-ink-200">
-          <span className="font-semibold tracking-tight">Menu</span>
-          <button
-            type="button"
-            aria-label="Close menu"
-            className="inline-flex items-center justify-center h-10 w-10 rounded-lg text-ink-700 hover:bg-ink-100 active:scale-95 transition"
-            onClick={onClose}
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-        <nav className="flex-1 overflow-y-auto p-2">
+      {open && (
+        <nav className="md:hidden border-t border-ink-200 bg-white px-2 py-2 space-y-1">
           {NAV.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
@@ -143,9 +108,7 @@ function MobileNavDrawer({ onClose }: { onClose: () => void }) {
               className={({ isActive }) =>
                 cn(
                   "flex items-center gap-3 px-3 py-3 rounded-xl text-base font-medium",
-                  isActive
-                    ? "bg-ink-900 text-white"
-                    : "text-ink-700 hover:bg-ink-100"
+                  isActive ? "bg-ink-900 text-white" : "text-ink-700 hover:bg-ink-100"
                 )
               }
             >
@@ -154,7 +117,7 @@ function MobileNavDrawer({ onClose }: { onClose: () => void }) {
             </NavLink>
           ))}
         </nav>
-      </aside>
-    </div>
+      )}
+    </header>
   );
 }
